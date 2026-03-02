@@ -186,21 +186,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // ═══════════════════════════════════════════════════════════════
     if let Some(framebuffer) = boot_info.framebuffer.as_mut() {
         let info = framebuffer.info();
-        serial_println!(
-            "[boot] Framebuffer: {}x{}, stride={}, bpp={}, format={:?}",
-            info.width,
-            info.height,
-            info.stride,
-            info.bytes_per_pixel,
-            info.pixel_format,
-        );
-
         let is_bgr = matches!(info.pixel_format, bootloader_api::info::PixelFormat::Bgr);
         let fb_ptr = framebuffer.buffer_mut().as_mut_ptr();
         let byte_stride = info.stride * info.bytes_per_pixel;
 
         gui::init(fb_ptr, info.width, info.height, byte_stride, info.bytes_per_pixel, is_bgr);
-        serial_println!("[boot] GUI compositor initialized.");
+        gui::virtual_desktop::init();
+        serial_println!("[boot] GUI compositor and Virtual Desktops initialized.");
 
         // Set mouse screen bounds now that we know framebuffer dimensions
         drivers::mouse::set_screen_bounds(info.width, info.height);

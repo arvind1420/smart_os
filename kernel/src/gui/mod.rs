@@ -24,6 +24,7 @@ pub mod alt_tab;
 pub mod virtual_desktop;
 pub mod theming;
 pub mod display_server;
+pub mod ipc;
 
 /// Initialize the GUI subsystem.
 pub fn init(fb_addr: *mut u8, width: usize, height: usize, stride: usize, bpp: usize, is_bgr: bool) {
