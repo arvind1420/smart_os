@@ -1,0 +1,10 @@
+[package]
+name = "image_builder"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Build tool that creates bootable UEFI disk images for Smart OS"
+
+[dependencies]
+bootloader = "0.11"

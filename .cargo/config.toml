@@ -1,0 +1,2 @@
+[target.x86_64-unknown-none]
+runner = "qemu-system-x86_64 -bios OVMF.fd -drive format=raw,file="

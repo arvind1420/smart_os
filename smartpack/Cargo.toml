@@ -1,0 +1,17 @@
+[package]
+name = "smartpack"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "SmartPack: Ultra-compact binary serialization format for Smart OS"
+
+[features]
+default = ["alloc"]
+alloc = []
+std = ["alloc"]
+compression = ["alloc"]
+
+[dependencies]
+
+[dev-dependencies]

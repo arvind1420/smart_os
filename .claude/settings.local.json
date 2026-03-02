@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:msgpack.org)",
+      "WebFetch(domain:cborbook.com)",
+      "WebFetch(domain:capnproto.org)",
+      "Bash(rustc:*)",
+      "Bash(cargo --version:*)",
+      "Bash(where:*)",
+      "Bash(curl:*)",
+      "Bash(sh -s:*)",
+      "Bash(powershell.exe -Command \"& { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; \\(New-Object Net.WebClient\\).DownloadFile\\(''https://win.rustup.rs/x86_64'', ''$env:TEMP\\\\rustup-init.exe''\\) }\")",
+      "Bash(powershell.exe -Command \"Invoke-WebRequest -Uri ''https://win.rustup.rs/x86_64'' -OutFile ''$env:TEMP\\\\rustup-init.exe''\")",
+      "Bash(\"C:/Users/arvin/AppData/Local/Temp/rustup-init.exe\" -y --default-toolchain nightly)",
+      "Bash(export PATH=\"$HOME/.cargo/bin:$PATH\")",
+      "Bash(rustup component add:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo build:*)",
+      "Bash(cargo run:*)",
+      "Bash(dir:*)",
+      "Bash(findstr:*)",
+      "Bash(while read f)",
+      "Bash(do wc -l \"$f\")",
+      "Bash(done)",
+      "Bash(ls:*)",
+      "Bash(find:*)",
+      "Bash(wc -l \"C:\\\\Users\\\\arvin\\\\Desktop\\\\Github\\\\Smart OS\\\\kernel\\\\src\"/**/*.rs)",
+      "Bash(python3 -c \" import sys, json lines = [] for line in sys.stdin: line = line.strip\\(\\) if line: try: obj = json.loads\\(line\\) if obj.get\\(''type''\\) in [''human'', ''assistant'']: content = obj.get\\(''message'', {}\\).get\\(''content'', ''''\\) if isinstance\\(content, list\\): text_parts = [p.get\\(''text'', ''''\\) for p in content if p.get\\(''type''\\) == ''text''] content = '' ''.join\\(text_parts\\) if content: lines.append\\(f\"\"{obj[''type'']}: {content[:500]}\"\"\\) except: pass for line in lines[-30:]: print\\(line\\) \")",
+      "Bash(powershell.exe -Command:*)",
+      "Bash(powershell:*)"
+    ]
+  }
+}
