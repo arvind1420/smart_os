@@ -9,6 +9,10 @@ pub const SYS_TCP_CLOSE: u64 = 38;
 pub const SYS_GETHOSTBYNAME: u64 = 69;
 pub const SYS_SYSINFO: u64 = 70;
 
+pub const SYS_FORK: u64 = 5;
+pub const SYS_EXEC: u64 = 6;
+pub const SYS_WAITPID: u64 = 7;
+
 pub const SYS_DISPLAY_CMD: u64 = 55;
 pub const SYS_DISPLAY_EVENT: u64 = 56;
 

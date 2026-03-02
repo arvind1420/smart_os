@@ -101,7 +101,7 @@ pub fn load_module(name: &str, elf_data: &[u8]) -> Result<(), &'static str> {
 
 pub fn init() {
     // Export core kernel functions for modules
-    export_symbol("serial_println", crate::serial::print as u64);
+    export_symbol("serial_println", crate::serial::_print as u64);
     export_symbol("kmalloc", 0); // Placeholder
     serial_println!("[kmod] Module loader initialized.");
 }
