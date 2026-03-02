@@ -1,0 +1,273 @@
+/// Kernel and user thread management.
+///
+/// Each thread has its own stack and a saved register context.
+/// Phase 5 adds: user-space threads with full InterruptContext save/restore,
+/// per-thread kernel stack, and pid association.
+
+use alloc::string::String;
+use alloc::vec::Vec;
+use super::{Pid, Tid, ThreadState, alloc_tid};
+
+/// Size of each kernel thread's stack (16 KiB).
+const THREAD_STACK_SIZE: usize = 4096 * 4;
+
+/// User-mode code segment selector (GDT index 4, RPL=3).
+pub const USER_CODE_SEL: u64 = (4 << 3) | 3; // 0x23
+/// User-mode data segment selector (GDT index 3, RPL=3).
+pub const USER_DATA_SEL: u64 = (3 << 3) | 3; // 0x1B
+
+/// A kernel or user thread.
+pub struct Thread {
+    /// Unique thread identifier.
+    pub tid: Tid,
+    /// Owning process ID (0 = kernel).
+    pub pid: Pid,
+    /// Human-readable name.
+    pub name: String,
+    /// Current state.
+    pub state: ThreadState,
+    /// Stack pointer (saved during context switch).
+    pub stack_ptr: u64,
+    /// Kernel stack top pointer (for syscall entry / TSS RSP0).
+    /// Only meaningful for user threads.
+    pub kernel_stack_ptr: u64,
+    /// The thread's stack memory (kernel stack for user threads, main stack for kernel threads).
+    pub(super) _stack: Option<Vec<u8>>,
+    /// Priority (lower = higher priority).
+    pub priority: u8,
+    /// Whether this thread runs in ring 3.
+    pub is_user: bool,
+    /// CR3 value for this thread's address space.
+    /// 0 means use the kernel page table.
+    pub cr3: u64,
+}
+
+impl Thread {
+    /// Create a new kernel thread that will execute the given function.
+    pub fn new(name: &str, entry: fn(), priority: u8) -> Self {
+        let tid = alloc_tid();
+
+        // Allocate a stack
+        let stack = alloc::vec![0u8; THREAD_STACK_SIZE];
+        let stack_top = stack.as_ptr() as u64 + THREAD_STACK_SIZE as u64;
+
+        // Set up the initial stack frame so that when we "return" to this
+        // thread, it starts executing at `entry`.
+        // We push a fake context that thread_switch will pop.
+        let initial_sp = stack_top - 8 * 7; // 7 callee-saved registers + return addr
+        unsafe {
+            let sp = initial_sp as *mut u64;
+            // Return address — when thread_switch does `ret`, it jumps here
+            core::ptr::write(sp.add(6), thread_entry_trampoline as *const () as u64);
+            // RBX = entry function pointer (we'll use it in the trampoline)
+            core::ptr::write(sp.add(5), entry as *const () as u64);
+            // RBP, R12-R15 = 0
+            core::ptr::write(sp.add(4), 0u64); // rbp
+            core::ptr::write(sp.add(3), 0u64); // r12
+            core::ptr::write(sp.add(2), 0u64); // r13
+            core::ptr::write(sp.add(1), 0u64); // r14
+            core::ptr::write(sp.add(0), 0u64); // r15
+        }
+
+        Thread {
+            tid,
+            pid: 0, // kernel process
+            name: String::from(name),
+            state: ThreadState::Ready,
+            stack_ptr: initial_sp,
+            kernel_stack_ptr: 0,
+            _stack: Some(stack),
+            priority,
+            is_user: false,
+            cr3: 0,
+        }
+    }
+
+    /// Create a thread representing the current (boot) execution context.
+    pub fn boot_thread() -> Self {
+        Thread {
+            tid: 0,
+            pid: 0,
+            name: String::from("kernel_main"),
+            state: ThreadState::Running,
+            stack_ptr: 0, // Will be saved on first context switch
+            kernel_stack_ptr: 0,
+            _stack: None,  // Boot thread uses the bootloader-provided stack
+            priority: 0,
+            is_user: false,
+            cr3: 0,
+        }
+    }
+
+    /// Create a new user-space thread with its own kernel stack.
+    ///
+    /// The kernel stack is set up with a full InterruptContext frame so that
+    /// when the scheduler switches to this thread, it pops all GPRs and does
+    /// `iretq` to enter ring 3.
+    ///
+    /// Layout on kernel stack (20 qwords, from low to high address):
+    ///   [R15, R14, R13, R12, R11, R10, R9, R8, RBP, RDI, RSI, RDX, RCX, RBX, RAX,
+    ///    RIP, CS, RFLAGS, RSP, SS]
+    pub fn new_user(
+        name: &str,
+        pid: Pid,
+        entry_rip: u64,
+        user_rsp: u64,
+        cr3: u64,
+        priority: u8,
+    ) -> Self {
+        let tid = alloc_tid();
+
+        // Allocate a kernel stack for this thread (used during syscalls/interrupts).
+        let kernel_stack = alloc::vec![0u8; THREAD_STACK_SIZE];
+        let kernel_stack_top = kernel_stack.as_ptr() as u64 + THREAD_STACK_SIZE as u64;
+
+        // Set up the full InterruptContext frame on the kernel stack.
+        // 20 qwords: 15 GPRs + 5 iretq frame.
+        let initial_sp = kernel_stack_top - 20 * 8;
+        unsafe {
+            let sp = initial_sp as *mut u64;
+            // GPRs (all zero initially) — offsets 0..14
+            core::ptr::write(sp.add(0), 0);  // R15
+            core::ptr::write(sp.add(1), 0);  // R14
+            core::ptr::write(sp.add(2), 0);  // R13
+            core::ptr::write(sp.add(3), 0);  // R12
+            core::ptr::write(sp.add(4), 0);  // R11
+            core::ptr::write(sp.add(5), 0);  // R10
+            core::ptr::write(sp.add(6), 0);  // R9
+            core::ptr::write(sp.add(7), 0);  // R8
+            core::ptr::write(sp.add(8), 0);  // RBP
+            core::ptr::write(sp.add(9), 0);  // RDI
+            core::ptr::write(sp.add(10), 0); // RSI
+            core::ptr::write(sp.add(11), 0); // RDX
+            core::ptr::write(sp.add(12), 0); // RCX
+            core::ptr::write(sp.add(13), 0); // RBX
+            core::ptr::write(sp.add(14), 0); // RAX
+            // iretq frame — offsets 15..19
+            core::ptr::write(sp.add(15), entry_rip);        // RIP
+            core::ptr::write(sp.add(16), USER_CODE_SEL);    // CS (0x23)
+            core::ptr::write(sp.add(17), 0x202);             // RFLAGS (IF set)
+            core::ptr::write(sp.add(18), user_rsp);          // RSP
+            core::ptr::write(sp.add(19), USER_DATA_SEL);    // SS (0x1B)
+        }
+
+        Thread {
+            tid,
+            pid,
+            name: String::from(name),
+            state: ThreadState::Ready,
+            stack_ptr: initial_sp,
+            kernel_stack_ptr: kernel_stack_top,
+            _stack: Some(kernel_stack),
+            priority,
+            is_user: true,
+            cr3,
+        }
+    }
+}
+
+/// Trampoline function that new kernel threads start in.
+/// RBX contains the entry function pointer (set up in Thread::new).
+#[unsafe(naked)]
+unsafe extern "C" fn thread_entry_trampoline() {
+    core::arch::naked_asm!(
+        "call rbx",      // Call the actual entry function (pointer in RBX)
+        "call {exit}",   // If it returns, mark thread as dead
+        "2: hlt",
+        "jmp 2b",
+        exit = sym thread_exit,
+    );
+}
+
+/// Called when a kernel thread's entry function returns.
+fn thread_exit() {
+    crate::serial_println!("[thread] Thread exited.");
+    super::scheduler::exit_current_thread();
+}
+
+/// Low-level context switch for kernel threads: save callee-saved registers,
+/// swap stack pointer.
+///
+/// Arguments: old_sp: *mut u64, new_sp: u64
+#[unsafe(naked)]
+pub unsafe extern "C" fn thread_switch(old_sp: *mut u64, new_sp: u64) {
+    core::arch::naked_asm!(
+        // Save callee-saved registers on the old stack
+        "push r15",
+        "push r14",
+        "push r13",
+        "push r12",
+        "push rbp",
+        "push rbx",
+        // Save the old stack pointer
+        "mov [rdi], rsp",
+        // Load the new stack pointer
+        "mov rsp, rsi",
+        // Restore callee-saved registers from the new stack
+        "pop rbx",
+        "pop rbp",
+        "pop r12",
+        "pop r13",
+        "pop r14",
+        "pop r15",
+        // Return to the new thread (address is on the new stack)
+        "ret",
+    );
+}
+
+/// Context switch to a user thread: save old kernel thread's callee-saved regs,
+/// switch CR3 if needed, then pop full InterruptContext + iretq to ring 3.
+///
+/// Arguments: old_sp: *mut u64, new_sp: u64, new_cr3: u64
+#[unsafe(naked)]
+pub unsafe extern "C" fn switch_to_user(
+    _old_sp: *mut u64,
+    _new_sp: u64,
+    _new_cr3: u64,
+) {
+    core::arch::naked_asm!(
+        // Save callee-saved registers on the old (kernel) stack
+        "push r15",
+        "push r14",
+        "push r13",
+        "push r12",
+        "push rbp",
+        "push rbx",
+        // Save old stack pointer
+        "mov [rdi], rsp",
+
+        // Switch to the user thread's kernel stack
+        "mov rsp, rsi",
+
+        // Switch CR3 if new_cr3 != 0
+        "test rdx, rdx",
+        "jz 2f",
+        "mov cr3, rdx",
+        "2:",
+
+        // Pop full InterruptContext: 15 GPRs
+        "pop r15",
+        "pop r14",
+        "pop r13",
+        "pop r12",
+        "pop r11",
+        "pop r10",
+        "pop r9",
+        "pop r8",
+        "pop rbp",
+        "pop rdi",
+        "pop rsi",
+        "pop rdx",
+        "pop rcx",
+        "pop rbx",
+        "pop rax",
+
+        // iretq: pops [RIP, CS, RFLAGS, RSP, SS] → jumps to ring 3
+        "iretq",
+    );
+}
+
+// Note: When returning from a user thread (preempted by timer), the interrupt
+// stub pushes a full InterruptContext onto the kernel stack and saves the RSP
+// as the thread's stack_ptr. The scheduler then uses the normal thread_switch
+// to pick the next thread.
