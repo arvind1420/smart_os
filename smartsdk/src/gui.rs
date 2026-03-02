@@ -6,7 +6,10 @@ pub const CMD_SET_TITLE: u64 = 2;
 pub const CMD_DRAW_TEXT: u64 = 3;
 pub const CMD_FILL_RECT: u64 = 4;
 pub const CMD_CLEAR: u64 = 5;
+pub const CMD_REDRAW: u64 = 6;
 pub const CMD_ADD_WIDGET: u64 = 7;
+pub const CMD_HUB_PUBLISH: u64 = 8;
+pub const CMD_HUB_QUERY: u64 = 9;
 
 pub const WIDGET_BUTTON: u64 = 0;
 
@@ -53,6 +56,14 @@ impl Window {
         let xy_packed = ((x as u64) << 16) | (y as u64);
         let wh_packed = ((w as u64) << 16) | (h as u64);
         syscall5(SYS_DISPLAY_CMD, CMD_ADD_WIDGET, self.id, WIDGET_BUTTON, xy_packed, wh_packed) as u8
+    }
+
+    pub fn hub_publish(&self, topic: &str, data_ptr: u64) {
+        syscall4(SYS_DISPLAY_CMD, CMD_HUB_PUBLISH, topic.as_ptr() as u64, topic.len() as u64, data_ptr);
+    }
+
+    pub fn hub_query(&self, topic: &str) -> u64 {
+        syscall4(SYS_DISPLAY_CMD, CMD_HUB_QUERY, topic.as_ptr() as u64, topic.len() as u64, 0)
     }
 
     pub fn poll_event() -> Option<GuiEvent> {

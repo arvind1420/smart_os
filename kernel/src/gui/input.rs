@@ -226,15 +226,32 @@ pub fn handle_mouse_event(event: MouseEvent) {
             let new_y = (my - drag.offset_y).max(0) as usize;
             drop(input);
 
-            let mut desktop = DESKTOP.lock();
-            if let Some(ref mut desk) = *desktop {
+            let mut desktop_guard = DESKTOP.lock();
+            if let Some(ref mut desk) = *desktop_guard {
                 if let Some(win) = desk.wm.get_mut(win_id) {
-                    // If window was snapped/maximized, un-snap on drag away
                     if win.pre_snap_bounds.is_some() {
                         win.restore();
                     }
                     win.x = new_x;
                     win.y = new_y;
+
+                    // Update ghost snap preview
+                    let screen_dims = {
+                        let comp = super::compositor::COMPOSITOR.lock();
+                        comp.as_ref().map(|c| (c.width, c.height))
+                    };
+                    if let Some((sw, sh)) = screen_dims {
+                        let snap_h = sh.saturating_sub(TASKBAR_HEIGHT);
+                        if mx <= 5 {
+                            desk.ghost_snap = Some((0, 0, sw / 2, snap_h));
+                        } else if mx >= (sw as i32 - 5) {
+                            desk.ghost_snap = Some((sw / 2, 0, sw / 2, snap_h));
+                        } else if my <= 5 {
+                            desk.ghost_snap = Some((0, 0, sw, snap_h));
+                        } else {
+                            desk.ghost_snap = None;
+                        }
+                    }
                 }
             }
             return;
@@ -458,6 +475,7 @@ pub fn handle_mouse_event(event: MouseEvent) {
                 drop(input);
                 let mut desktop = DESKTOP.lock();
                 if let Some(ref mut desk) = *desktop {
+                    desk.ghost_snap = None;
                     if let Some(win) = desk.wm.get_mut(win_id) {
                         // Snap to edges
                         if mx <= 5 {

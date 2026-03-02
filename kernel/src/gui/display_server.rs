@@ -25,6 +25,8 @@ pub const CMD_FILL_RECT: u64 = 4;
 pub const CMD_CLEAR: u64 = 5;
 pub const CMD_REDRAW: u64 = 6;
 pub const CMD_ADD_WIDGET: u64 = 7;
+pub const CMD_HUB_PUBLISH: u64 = 8;
+pub const CMD_HUB_QUERY: u64 = 9;
 
 // ═══════════════════════════════════════════════════════════════
 //  Display event types
@@ -112,6 +114,8 @@ pub fn handle_cmd(pid: u64, cmd: u64, arg1: u64, arg2: u64, arg3: u64, _arg4: u6
         CMD_FILL_RECT => fill_rect(pid, arg1 as WindowId, arg2, arg3, _arg4),
         CMD_CLEAR => clear_window(pid, arg1 as WindowId),
         CMD_ADD_WIDGET => add_widget(pid, arg1 as WindowId, arg2, arg3, _arg4),
+        CMD_HUB_PUBLISH => hub_publish(pid, arg1, arg2, arg3),
+        CMD_HUB_QUERY => hub_query(pid, arg1, arg2, arg3),
         CMD_REDRAW => { /* redraw happens automatically in render loop */ 0 }
         _ => u64::MAX,
     }
@@ -341,6 +345,29 @@ fn add_widget(pid: u64, wid: WindowId, kind: u64, xy_packed: u64, wh_packed: u64
         }
     }
     u64::MAX
+}
+
+fn hub_publish(pid: u64, topic_ptr: u64, topic_len: u64, payload_ptr: u64) -> u64 {
+    let topic = unsafe {
+        let ptr = topic_ptr as *const u8;
+        if ptr.is_null() || topic_ptr >= 0x8000_0000_0000 { return u64::MAX; }
+        let slice = core::slice::from_raw_parts(ptr, topic_len as usize);
+        core::str::from_utf8(slice).unwrap_or("unknown")
+    };
+    // Simplified payload handling
+    super::ipc::publish(pid, topic, smartpack::Value::UInt64(payload_ptr));
+    0
+}
+
+fn hub_query(_pid: u64, topic_ptr: u64, topic_len: u64, _out_ptr: u64) -> u64 {
+    let topic = unsafe {
+        let ptr = topic_ptr as *const u8;
+        if ptr.is_null() || topic_ptr >= 0x8000_0000_0000 { return u64::MAX; }
+        let slice = core::slice::from_raw_parts(ptr, topic_len as usize);
+        core::str::from_utf8(slice).unwrap_or("unknown")
+    };
+    let results = super::ipc::query(topic);
+    results.len() as u64
 }
 
 // ═══════════════════════════════════════════════════════════════

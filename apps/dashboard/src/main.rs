@@ -48,6 +48,9 @@ pub extern "C" fn _start() -> ! {
                 win.draw_text(10, 60, mem_str);
                 win.draw_text(10, 80, thread_str);
                 win.draw_text(10, 100, uptime_str);
+
+                // Publish status to Hub
+                win.hub_publish("system_status", info.uptime);
             }
             
             for _ in 0..5_000_000 { core::hint::spin_loop(); }

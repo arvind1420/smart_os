@@ -80,7 +80,6 @@ pub const DT_RELASZ: i64 = 8;
 pub const DT_RELAENT: i64 = 9;
 
 const PT_LOAD: u32 = 1;
-const PT_DYNAMIC: u32 = 2;
 const PF_X: u32 = 1;
 const PF_W: u32 = 2;
 #[allow(dead_code)]

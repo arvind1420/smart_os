@@ -22,6 +22,8 @@ pub struct Desktop {
     splash_shown: bool,
     /// Frame counter.
     frame_count: u64,
+    /// Ghost snap preview (x, y, w, h).
+    pub ghost_snap: Option<(usize, usize, usize, usize)>,
 }
 
 impl Desktop {
@@ -30,6 +32,7 @@ impl Desktop {
             wm: WindowManager::new(),
             splash_shown: false,
             frame_count: 0,
+            ghost_snap: None,
         }
     }
 }
@@ -67,6 +70,12 @@ pub fn render() {
 
     // ── Phase 2: Draw background pattern (subtle grid) ──
     draw_background_grid(comp, screen_w, screen_h);
+
+    // ── Phase 2.5: Draw ghost snap preview ──
+    if let Some((gx, gy, gw, gh)) = desktop.ghost_snap {
+        comp.fill_rect(gx, gy, gw, gh, Color::rgb(0, 100, 128));
+        comp.draw_rect(gx, gy, gw, gh, Color::rgb(0, 200, 255));
+    }
 
     // ── Phase 3: Splash title (top area) ──
     if !desktop.splash_shown {
