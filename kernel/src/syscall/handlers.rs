@@ -85,3 +85,25 @@ pub fn sys_tcp_recv(fd: usize, buf: &mut [u8]) -> Result<usize, &'static str> {
 pub fn sys_gethostbyname(name: &str) -> Result<[u8; 4], &'static str> {
     crate::net::dns::resolve(name)
 }
+
+/// Get system information.
+pub fn sys_sysinfo(buf: &mut [u8]) -> Result<usize, &'static str> {
+    if buf.len() < 32 { return Err("Buffer too small"); }
+    
+    let (heap_used, heap_free) = crate::memory::heap::heap_stats();
+    let cpu_count = crate::arch::x86_64::smp::cpu_count();
+    let thread_count = crate::process::scheduler::ready_count() as u64 + 1;
+    let uptime = crate::drivers::timer::uptime_secs();
+
+    // Pack into buffer
+    unsafe {
+        let ptr = buf.as_mut_ptr() as *mut u64;
+        ptr.write_unaligned(heap_used as u64);
+        ptr.add(1).write_unaligned(heap_free as u64);
+        ptr.add(2).write_unaligned(cpu_count as u64);
+        ptr.add(3).write_unaligned(thread_count);
+        ptr.add(4).write_unaligned(uptime);
+    }
+    
+    Ok(40) // 5 * 8 bytes
+}

@@ -1,0 +1,11 @@
+[package]
+name = "dashboard"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+smartsdk = { path = "../../smartsdk" }
+
+[[bin]]
+name = "dashboard"
+path = "src/main.rs"

@@ -7,6 +7,7 @@ pub const SYS_TCP_SEND: u64 = 36;
 pub const SYS_TCP_RECV: u64 = 37;
 pub const SYS_TCP_CLOSE: u64 = 38;
 pub const SYS_GETHOSTBYNAME: u64 = 69;
+pub const SYS_SYSINFO: u64 = 70;
 
 pub const SYS_DISPLAY_CMD: u64 = 55;
 pub const SYS_DISPLAY_EVENT: u64 = 56;

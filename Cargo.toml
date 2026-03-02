@@ -5,6 +5,7 @@ members = [
     "tools/image_builder",
     "smartsdk",
     "tools/module_loader",
+    "apps/dashboard",
 ]
 resolver = "2"
 

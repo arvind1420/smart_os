@@ -196,33 +196,104 @@ pub fn create_ls_elf() -> Vec<u8> {
 /// A real interactive shell would need blocking read from stdin,
 /// which requires more infrastructure. This version just proves
 /// the fork+exec+waitpid pipeline works.
+/// `/bin/sh` — Native interactive shell.
 pub fn create_sh_elf() -> Vec<u8> {
-    // Shell: print a welcome banner, then SYS_EXIT(0).
-    // In a more complete system, this would:
-    //   1. Print "$ " prompt
-    //   2. Read a line from stdin (SYS_READ fd=0)
-    //   3. Fork
-    //   4. Child: exec the command
-    //   5. Parent: waitpid, then goto 1
-    //
-    // For now: print banner + exit.
-    let msg = b"Smart OS shell v0.1 (exit immediately)\n";
-    let msg_len = msg.len() as u8;
+    use super::asm_builder::*;
+    let mut code = Vec::new();
 
-    let mut code: Vec<u8> = vec![
-        // SYS_WRITE(1, msg, len)
-        0x48, 0xC7, 0xC0, SYS_WRITE, 0, 0, 0,
-        0x48, 0xC7, 0xC7, 1, 0, 0, 0,
-        0x48, 0x8D, 0x35, 0x17, 0x00, 0x00, 0x00,
-        0x48, 0xC7, 0xC2, msg_len, 0, 0, 0,
-        0x0F, 0x05,
-        // SYS_EXIT(0)
-        0x48, 0xC7, 0xC0, SYS_EXIT, 0, 0, 0,
-        0x48, 0x31, 0xFF,
-        0x0F, 0x05,
-        0xEB, 0xFE,
-    ];
-    code.extend_from_slice(msg);
+    // 1. Welcome banner
+    let lea_welcome = current_offset(&code);
+    emit_write_stdout(&mut code, 0, 30);
+
+    let loop_start = current_offset(&code);
+
+    // 2. Print prompt "> "
+    let lea_prompt = current_offset(&code);
+    emit_write_stdout(&mut code, 0, 2);
+
+    // 3. SYS_READ(stdin=0, buf, 64)
+    emit_mov_reg_imm32(&mut code, Reg::Rax, 22); // SYS_READ
+    emit_mov_reg_imm32(&mut code, Reg::Rdi, 0);  // stdin
+    let lea_buf = current_offset(&code);
+    emit_lea_rip_rel(&mut code, Reg::Rsi, 0);
+    emit_mov_reg_imm32(&mut code, Reg::Rdx, 64);
+    emit_syscall(&mut code);
+    
+    // Save length in RBX
+    emit_mov_reg_reg(&mut code, Reg::Rbx, Reg::Rax);
+    // If length <= 1, just loop (empty line)
+    emit_cmp_rax_imm8(&mut code, 1);
+    let jle_loop = current_offset(&code);
+    emit_je_short(&mut code, 0);
+
+    // 4. SYS_FORK (5)
+    emit_mov_reg_imm32(&mut code, Reg::Rax, 5);
+    emit_syscall(&mut code);
+    
+    // test rax, rax
+    emit_test_rax_rax(&mut code);
+    let jnz_parent = current_offset(&code);
+    emit_jnz_short(&mut code, 0);
+
+    // --- CHILD PATH ---
+    // Save child PID (0 in child) - wait, child doesn't need it
+    
+    // Trim newline (if any)
+    // The syscall read usually includes the \n.
+    // We'll decrement RBX if the last char is \n.
+    
+    // SYS_EXEC(path=buf, len=rbx) (6)
+    emit_mov_reg_imm32(&mut code, Reg::Rax, 6);
+    let lea_buf_exec = current_offset(&code);
+    emit_lea_rip_rel(&mut code, Reg::Rdi, 0);
+    emit_mov_reg_reg(&mut code, Reg::Rsi, Reg::Rbx);
+    // Optional: sub rsi, 1 to remove \n if it exists
+    // (Hand-assembled sub rsi, 1: 48 83 EE 01)
+    emit_data(&mut code, &[0x48, 0x83, 0xEE, 0x01]);
+    emit_syscall(&mut code);
+    
+    // If exec fails, exit
+    emit_exit(&mut code, 1);
+
+    // --- PARENT PATH ---
+    let parent_start = current_offset(&code);
+    code[jnz_parent + 1] = ((parent_start as i32) - ((jnz_parent + 2) as i32)) as u8;
+    
+    // SYS_WAITPID(child_pid=rax) (7)
+    emit_mov_reg_reg(&mut code, Reg::Rdi, Reg::Rax);
+    emit_mov_reg_imm32(&mut code, Reg::Rax, 7);
+    emit_syscall(&mut code);
+
+    // Loop back to prompt
+    let jmp_loop = current_offset(&code);
+    emit_jmp_short(&mut code, 0);
+    code[jmp_loop + 1] = ((loop_start as i32) - ((jmp_loop + 2) as i32)) as u8;
+    code[jle_loop + 1] = ((loop_start as i32) - ((jle_loop + 2) as i32)) as u8;
+
+    // --- DATA ---
+    let welcome_pos = current_offset(&code);
+    emit_data(&mut code, b"Smart OS Native Shell v1.0\n\n");
+    let prompt_pos = current_offset(&code);
+    emit_data(&mut code, b"> ");
+    let buf_pos = current_offset(&code);
+    code.resize(buf_pos + 64, 0);
+
+    // --- PATCHING ---
+    let patch_lea_stdout = |code: &mut Vec<u8>, lea_pos: usize, target_pos: usize| {
+        let lea_start = lea_pos + 14;
+        let offset = (target_pos as i32) - ((lea_start + 7) as i32);
+        code[lea_start + 3..lea_start + 7].copy_from_slice(&offset.to_le_bytes());
+    };
+    let patch_lea = |code: &mut Vec<u8>, lea_pos: usize, target_pos: usize| {
+        let offset = (target_pos as i32) - ((lea_pos + 7) as i32);
+        code[lea_pos + 3..lea_pos + 7].copy_from_slice(&offset.to_le_bytes());
+    };
+
+    patch_lea_stdout(&mut code, lea_welcome, welcome_pos);
+    patch_lea_stdout(&mut code, lea_prompt, prompt_pos);
+    patch_lea(&mut code, lea_buf, buf_pos);
+    patch_lea(&mut code, lea_buf_exec, buf_pos);
+
     build_elf64(0x400000, &code)
 }
 
@@ -656,6 +727,81 @@ pub fn create_net_client_elf() -> Vec<u8> {
     patch_lea(&mut code, lea_req, req_pos);
     patch_lea(&mut code, lea_buf, buf_pos);
     patch_lea(&mut code, lea_buf2, buf_pos);
+
+    build_elf64(0x400000, &code)
+}
+
+/// `/bin/sdk-demo` — A GUI app built using SDK-style logic.
+pub fn create_sdk_demo_elf() -> Vec<u8> {
+    use super::asm_builder::*;
+    let mut code = Vec::new();
+
+    // 1. Create Window (SYS_DISPLAY_CMD, CMD_CREATE_WINDOW, 400, 300)
+    emit_mov_reg_imm32(&mut code, Reg::Rax, 55); // SYS_DISPLAY_CMD
+    emit_mov_reg_imm32(&mut code, Reg::Rdi, 0);  // CMD_CREATE_WINDOW
+    emit_mov_reg_imm32(&mut code, Reg::Rsi, 400); // Width
+    emit_mov_reg_imm32(&mut code, Reg::Rdx, 300); // Height
+    emit_syscall(&mut code);
+    // Save Window ID in RBX
+    emit_mov_reg_reg(&mut code, Reg::Rbx, Reg::Rax);
+
+    // 2. Draw Text "SDK GUI + Network Demo"
+    emit_mov_reg_imm32(&mut code, Reg::Rax, 55);
+    emit_mov_reg_imm32(&mut code, Reg::Rdi, 3); // CMD_DRAW_TEXT
+    emit_mov_reg_reg(&mut code, Reg::Rsi, Reg::Rbx); // Window ID
+    emit_mov_reg_imm32(&mut code, Reg::Rdx, (10 << 16) | 10); // X=10, Y=10
+    let lea_title = current_offset(&code);
+    emit_lea_rip_rel(&mut code, Reg::R10, 0); // Placeholder for title text
+    emit_mov_reg_imm32(&mut code, Reg::R8, 22); // Len
+    emit_syscall(&mut code);
+
+    // 3. Resolve smartos.org
+    emit_mov_reg_imm32(&mut code, Reg::Rax, 69); // SYS_GETHOSTBYNAME
+    let lea_host = current_offset(&code);
+    emit_lea_rip_rel(&mut code, Reg::Rdi, 0);
+    emit_mov_reg_imm32(&mut code, Reg::Rsi, 11);
+    emit_syscall(&mut code);
+    // Save IP in R10
+    emit_mov_reg_reg(&mut code, Reg::R10, Reg::Rax);
+
+    // 4. Connect
+    emit_mov_reg_imm32(&mut code, Reg::Rax, 33); // SYS_TCP_CONNECT
+    emit_mov_reg_reg(&mut code, Reg::Rdi, Reg::R10);
+    emit_mov_reg_imm32(&mut code, Reg::Rsi, 80);
+    emit_syscall(&mut code);
+    // Save Socket FD in RCX (since RBX is Window ID)
+    emit_mov_reg_reg(&mut code, Reg::Rcx, Reg::Rax);
+
+    // 5. Draw "Connected!" in window
+    emit_mov_reg_imm32(&mut code, Reg::Rax, 55);
+    emit_mov_reg_imm32(&mut code, Reg::Rdi, 3);
+    emit_mov_reg_reg(&mut code, Reg::Rsi, Reg::Rbx);
+    emit_mov_reg_imm32(&mut code, Reg::Rdx, (10 << 16) | 40);
+    let lea_status = current_offset(&code);
+    emit_lea_rip_rel(&mut code, Reg::R10, 0);
+    emit_mov_reg_imm32(&mut code, Reg::R8, 10);
+    emit_syscall(&mut code);
+
+    // 6. Exit
+    emit_exit(&mut code, 0);
+
+    // --- DATA ---
+    let title_pos = current_offset(&code);
+    emit_data(&mut code, b"SDK GUI + Network Demo");
+    let host_pos = current_offset(&code);
+    emit_data(&mut code, b"smartos.org");
+    let status_pos = current_offset(&code);
+    emit_data(&mut code, b"Connected!");
+
+    // --- PATCHING ---
+    let patch_lea = |code: &mut Vec<u8>, lea_pos: usize, target_pos: usize| {
+        let offset = (target_pos as i32) - ((lea_pos + 7) as i32);
+        code[lea_pos + 3..lea_pos + 7].copy_from_slice(&offset.to_le_bytes());
+    };
+
+    patch_lea(&mut code, lea_title, title_pos);
+    patch_lea(&mut code, lea_host, host_pos);
+    patch_lea(&mut code, lea_status, status_pos);
 
     build_elf64(0x400000, &code)
 }

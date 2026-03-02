@@ -458,6 +458,18 @@ extern "C" fn syscall_dispatcher(frame: *const SyscallFrame) -> u64 {
                 u64::MAX
             }
         }
+        SYS_SYSINFO => {
+            let buf_ptr = frame.rdi;
+            let buf_len = frame.rsi as usize;
+            if buf_ptr >= 0x0000_8000_0000_0000 || buf_len > 1024 {
+                return u64::MAX;
+            }
+            let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, buf_len) };
+            match crate::syscall::handlers::sys_sysinfo(buf) {
+                Ok(n) => n as u64,
+                Err(_) => u64::MAX,
+            }
+        }
         SYS_DUP2 => {
             // arg0 = old_fd, arg1 = new_fd
             let old_fd = frame.rdi as usize;

@@ -273,9 +273,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial_println!("[boot] Demo ELF size: {} bytes", hello_elf.len());
     vfs::create_and_write("/bin/hello", &hello_elf).expect("Failed to store hello ELF");
 
-    serial_println!("[boot] Spawning user-space process 'hello'...");
-    match process::scheduler::spawn_user_process("hello", "/bin/hello") {
-        Ok(pid) => serial_println!("[boot] User process 'hello' spawned (pid={}).", pid),
+    serial_println!("[boot] Spawning user-space process 'sh'...");
+    match process::scheduler::spawn_user_process("sh", "/bin/sh") {
+        Ok(pid) => serial_println!("[boot] User process 'sh' spawned (pid={}).", pid),
         Err(e) => serial_println!("[boot] WARNING: Failed to spawn user process: {}", e),
     }
 
@@ -310,8 +310,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  PHASE 18: Persistent disk filesystem
+    //  PHASE 18: Persistent disk filesystem (VirtIO + NVMe)
     // ═══════════════════════════════════════════════════════════════
+    serial_println!("[boot] Initializing NVMe storage devices...");
+    drivers::nvme::init();
+
     serial_println!("[boot] Mounting disk filesystem...");
     drivers::diskfs::init();
 
@@ -466,6 +469,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
             ("/bin/sh", process::userprogs::create_sh_elf()),
             ("/bin/forktest", process::userprogs::create_forktest_elf()),
             ("/bin/net-client", process::userprogs::create_net_client_elf()),
+            ("/bin/sdk-demo", process::userprogs::create_sdk_demo_elf()),
         ];
         for (path, elf) in progs {
             if vfs::create_and_write(path, elf).is_ok() {

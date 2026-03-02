@@ -4,6 +4,7 @@ pub mod syscall;
 pub mod io;
 pub mod net;
 pub mod gui;
+pub mod sysinfo;
 
 use core::panic::PanicInfo;
 
