@@ -19,6 +19,7 @@ pub mod userprogs;
 pub mod posix;
 pub mod sigdeliver;
 pub mod asm_builder;
+pub mod kmod;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 

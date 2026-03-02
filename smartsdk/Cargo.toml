@@ -1,0 +1,7 @@
+[package]
+name = "smartsdk"
+version = "0.1.0"
+edition = "2024"
+description = "User-space SDK for Smart OS applications"
+
+[dependencies]

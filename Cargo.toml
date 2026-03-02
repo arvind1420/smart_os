@@ -3,6 +3,8 @@ members = [
     "smartpack",
     "kernel",
     "tools/image_builder",
+    "smartsdk",
+    "tools/module_loader",
 ]
 resolver = "2"
 

@@ -144,6 +144,12 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     syscall::init();
 
     // ═══════════════════════════════════════════════════════════════
+    //  PHASE 8.5: Kernel Module Loader
+    // ═══════════════════════════════════════════════════════════════
+    serial_println!("[boot] Initializing Kernel Module Loader (.sys support)...");
+    // process::kmod::init() would go here if it had internal state beyond a global Mutex
+
+    // ═══════════════════════════════════════════════════════════════
     //  PHASE 9: Virtual File System
     // ═══════════════════════════════════════════════════════════════
     serial_println!("[boot] Initializing virtual file system...");
@@ -160,7 +166,23 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  PHASE 10: GUI compositor + desktop environment
+    //  PHASE 10: PCI bus scan + GPU discovery
+    // ═══════════════════════════════════════════════════════════════
+    serial_println!("[boot] Scanning PCI bus...");
+    drivers::pci::init();
+
+    serial_println!("[boot] Initializing DRM subsystem...");
+    drivers::drm::init();
+    
+    serial_println!("[boot] Searching for Intel iGPU...");
+    if drivers::igpu::init().is_ok() {
+        serial_println!("[boot] Intel iGPU hardware acceleration ready.");
+    } else {
+        serial_println!("[boot] No Intel iGPU found. Falling back to software rendering.");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  PHASE 11: GUI compositor + desktop environment
     // ═══════════════════════════════════════════════════════════════
     if let Some(framebuffer) = boot_info.framebuffer.as_mut() {
         let info = framebuffer.info();
@@ -255,22 +277,6 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     match process::scheduler::spawn_user_process("hello", "/bin/hello") {
         Ok(pid) => serial_println!("[boot] User process 'hello' spawned (pid={}).", pid),
         Err(e) => serial_println!("[boot] WARNING: Failed to spawn user process: {}", e),
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    //  PHASE 16: PCI bus scan + GPU discovery
-    // ═══════════════════════════════════════════════════════════════
-    serial_println!("[boot] Scanning PCI bus...");
-    drivers::pci::init();
-
-    serial_println!("[boot] Initializing DRM subsystem...");
-    drivers::drm::init();
-    
-    serial_println!("[boot] Searching for Intel iGPU...");
-    if drivers::igpu::init().is_ok() {
-        serial_println!("[boot] Intel iGPU hardware acceleration ready.");
-    } else {
-        serial_println!("[boot] No Intel iGPU found. Falling back to software rendering.");
     }
 
     // ═══════════════════════════════════════════════════════════════
