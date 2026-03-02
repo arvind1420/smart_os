@@ -177,5 +177,11 @@ unsafe fn strlen(s: *const u8) -> usize {
 pub fn init() {
     // Export core kernel functions
     export_symbol("serial_println", crate::serial::_print as *const () as u64);
-    serial_println!("[kmod] Module loader initialized.");
+    export_symbol("kmalloc", crate::memory::heap::kmalloc as *const () as u64);
+    export_symbol("kfree", crate::memory::heap::kfree as *const () as u64);
+    export_symbol("vfs_open", crate::vfs::open as *const () as u64);
+    export_symbol("vfs_read", crate::vfs::read as *const () as u64);
+    export_symbol("vfs_close", crate::vfs::close as *const () as u64);
+    
+    serial_println!("[kmod] Module loader initialized ({} symbols exported).", KERNEL_SYMBOLS.lock().len());
 }

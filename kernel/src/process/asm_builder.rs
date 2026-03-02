@@ -17,6 +17,7 @@ pub enum Reg {
     Rax = 0, Rcx = 1, Rdx = 2, Rbx = 3,
     Rsp = 4, Rbp = 5, Rsi = 6, Rdi = 7,
     R8 = 8, R9 = 9, R10 = 10,
+    R11 = 11, R12 = 12, R13 = 13, R14 = 14, R15 = 15,
 }
 
 impl Reg {
@@ -87,6 +88,17 @@ pub fn emit_syscall(code: &mut Vec<u8>) {
 }
 
 /// Emit `test rax, rax` (sets ZF if rax==0).
+pub fn emit_sub_reg_imm8(code: &mut Vec<u8>, reg: Reg, imm: u8) {
+    if reg as u8 >= 8 {
+        code.push(0x49); // REX.B
+    } else {
+        code.push(0x48); // REX.W
+    }
+    code.push(0x83);
+    code.push(0xE8 | (reg as u8 & 7));
+    code.push(imm);
+}
+
 pub fn emit_test_rax_rax(code: &mut Vec<u8>) {
     code.push(0x48);
     code.push(0x85);

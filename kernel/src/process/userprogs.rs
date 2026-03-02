@@ -805,3 +805,54 @@ pub fn create_sdk_demo_elf() -> Vec<u8> {
 
     build_elf64(0x400000, &code)
 }
+
+/// `/bin/stress-test` — Heavily stresses the GUI, Network, and Memory subsystems.
+pub fn create_stress_test_elf() -> Vec<u8> {
+    use super::asm_builder::*;
+    let mut code = Vec::new();
+
+    // 1. Stress GUI: Create 20 windows in a loop
+    emit_mov_reg_imm32(&mut code, Reg::Rbx, 20); // Loop counter
+    let gui_loop = current_offset(&code);
+    
+    emit_mov_reg_imm32(&mut code, Reg::Rax, 55); // SYS_DISPLAY_CMD
+    emit_mov_reg_imm32(&mut code, Reg::Rdi, 0);  // CMD_CREATE_WINDOW
+    emit_mov_reg_imm32(&mut code, Reg::Rsi, 100); // Width
+    emit_mov_reg_imm32(&mut code, Reg::Rdx, 100); // Height
+    emit_syscall(&mut code);
+    
+    emit_sub_reg_imm8(&mut code, Reg::Rbx, 1);
+    let offset1 = (gui_loop as i32) - ((current_offset(&code) + 2) as i32);
+    emit_jnz_short(&mut code, offset1 as i8);
+
+    // 2. Stress Memory: Large Allocation + Fork
+    emit_mov_reg_imm32(&mut code, Reg::Rax, 5); // SYS_FORK
+    emit_syscall(&mut code);
+    
+    // 3. Stress Network: Rapid DNS queries
+    emit_mov_reg_imm32(&mut code, Reg::Rbx, 10);
+    let net_loop = current_offset(&code);
+    emit_mov_reg_imm32(&mut code, Reg::Rax, 69); // SYS_GETHOSTBYNAME
+    let lea_host = current_offset(&code);
+    emit_lea_rip_rel(&mut code, Reg::Rdi, 0);
+    emit_mov_reg_imm32(&mut code, Reg::Rsi, 11);
+    emit_syscall(&mut code);
+    emit_sub_reg_imm8(&mut code, Reg::Rbx, 1);
+    let offset2 = (net_loop as i32) - ((current_offset(&code) + 2) as i32);
+    emit_jnz_short(&mut code, offset2 as i8);
+
+    emit_exit(&mut code, 0);
+
+    // --- DATA ---
+    let host_pos = current_offset(&code);
+    emit_data(&mut code, b"smartos.org");
+
+    // --- PATCHING ---
+    let patch_lea = |code: &mut Vec<u8>, lea_pos: usize, target_pos: usize| {
+        let offset = (target_pos as i32) - ((lea_pos + 7) as i32);
+        code[lea_pos + 3..lea_pos + 7].copy_from_slice(&offset.to_le_bytes());
+    };
+    patch_lea(&mut code, lea_host, host_pos);
+
+    build_elf64(0x400000, &code)
+}

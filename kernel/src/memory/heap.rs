@@ -63,3 +63,13 @@ pub fn heap_stats() -> (usize, usize) {
     let allocator = ALLOCATOR.lock();
     (allocator.used(), allocator.free())
 }
+
+pub fn kmalloc(size: usize, align: usize) -> *mut u8 {
+    let layout = core::alloc::Layout::from_size_align(size, align).unwrap();
+    unsafe { alloc::alloc::alloc(layout) }
+}
+
+pub fn kfree(ptr: *mut u8, size: usize, align: usize) {
+    let layout = core::alloc::Layout::from_size_align(size, align).unwrap();
+    unsafe { alloc::alloc::dealloc(ptr, layout) }
+}

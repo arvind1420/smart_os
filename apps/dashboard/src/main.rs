@@ -17,6 +17,9 @@ pub extern "C" fn _start() -> ! {
         let load_btn_id = win.add_button(10, 120, 120, 30);
         win.draw_text(20, 127, "Load Driver");
 
+        let stress_btn_id = win.add_button(140, 120, 120, 30);
+        win.draw_text(150, 127, "Stress Test");
+
         loop {
             // Check for events
             while let Some(ev) = Window::poll_event() {
@@ -28,6 +31,14 @@ pub extern "C" fn _start() -> ! {
                             win.draw_text(10, 160, "Driver Loaded OK!");
                         } else {
                             win.draw_text(10, 160, "Driver Load Failed");
+                        }
+                    } else if btn_id == stress_btn_id {
+                        print("Dashboard: Launching stress-test...\n");
+                        let pid = smartsdk::syscall::syscall1(smartsdk::syscall::SYS_FORK, 0);
+                        if pid == 0 {
+                            let path = "/bin/stress-test\0";
+                            smartsdk::syscall::syscall3(smartsdk::syscall::SYS_EXEC, path.as_ptr() as u64, (path.len()-1) as u64, 0);
+                            smartsdk::syscall::exit(1);
                         }
                     }
                 }

@@ -240,6 +240,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial_println!("[boot] Spawning system threads...");
     process::scheduler::spawn("gui-renderer", gui_render_thread, 10);
     process::scheduler::spawn("ipc-logger", ipc_logger_thread, 5);
+    process::scheduler::spawn("ai-prefetch", ai::prefetch::prefetch_worker, 4);
+    process::scheduler::spawn("ai-anomaly", ai_anomaly_detector, 3);
 
     serial_println!("[boot] Spawning interactive applications...");
     process::scheduler::spawn("terminal", apps::terminal::run, 7);
@@ -281,21 +283,21 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     }
 
     serial_println!("[boot] Initializing VirtIO network device...");
-    let mut nic_found = false;
+    let mut _nic_found = false;
     match drivers::virtio_net::init() {
         Ok(()) => {
             serial_println!("[boot] VirtIO network device ready.");
-            nic_found = true;
+            _nic_found = true;
         }
         Err(e) => serial_println!("[boot] VirtIO net: {} (no NIC attached)", e),
     }
 
-    if !nic_found {
+    if !_nic_found {
         serial_println!("[boot] Initializing Intel e1000 network device...");
         match drivers::e1000::init() {
             Ok(()) => {
                 serial_println!("[boot] Intel e1000 network device ready.");
-                nic_found = true;
+                _nic_found = true;
             }
             Err(e) => serial_println!("[boot] Intel e1000: {} (no NIC attached)", e),
         }
@@ -462,6 +464,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
             ("/bin/forktest", process::userprogs::create_forktest_elf()),
             ("/bin/net-client", process::userprogs::create_net_client_elf()),
             ("/bin/sdk-demo", process::userprogs::create_sdk_demo_elf()),
+            ("/bin/stress-test", process::userprogs::create_stress_test_elf()),
         ];
         for (path, elf) in progs {
             if vfs::create_and_write(path, elf).is_ok() {
@@ -596,6 +599,26 @@ fn net_rx_thread() {
         // TCP timer: retransmission and connection cleanup
         net::tcp::tcp_timer_tick();
         process::scheduler::yield_now();
+    }
+}
+
+/// AI Anomaly Detector thread — monitors system behavior for suspicious patterns.
+fn ai_anomaly_detector() {
+    serial_println!("[thread:ai-anomaly] Started.");
+    loop {
+        // AI heuristic: detect "Window Flooding" or "Thread Spawning" anomalies.
+        let (win_count, _) = gui::display_server::status();
+        if win_count > 30 {
+            serial_println!("[ai-anomaly] WARNING: Window flood detected ({} windows active)!", win_count);
+        }
+
+        // Detect excessive thread count
+        let threads = process::scheduler::ready_count() + process::scheduler::blocked_count();
+        if threads > 50 {
+            serial_println!("[ai-anomaly] WARNING: Extreme thread pressure ({} threads)!", threads);
+        }
+
+        for _ in 0..500 { process::scheduler::yield_now(); }
     }
 }
 
