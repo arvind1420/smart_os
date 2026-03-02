@@ -24,6 +24,7 @@ pub const CMD_DRAW_TEXT: u64 = 3;
 pub const CMD_FILL_RECT: u64 = 4;
 pub const CMD_CLEAR: u64 = 5;
 pub const CMD_REDRAW: u64 = 6;
+pub const CMD_ADD_WIDGET: u64 = 7;
 
 // ═══════════════════════════════════════════════════════════════
 //  Display event types
@@ -110,6 +111,7 @@ pub fn handle_cmd(pid: u64, cmd: u64, arg1: u64, arg2: u64, arg3: u64, _arg4: u6
         CMD_DRAW_TEXT => draw_text(pid, arg1 as WindowId, arg2, arg3, _arg4),
         CMD_FILL_RECT => fill_rect(pid, arg1 as WindowId, arg2, arg3, _arg4),
         CMD_CLEAR => clear_window(pid, arg1 as WindowId),
+        CMD_ADD_WIDGET => add_widget(pid, arg1 as WindowId, arg2, arg3, _arg4),
         CMD_REDRAW => { /* redraw happens automatically in render loop */ 0 }
         _ => u64::MAX,
     }
@@ -306,6 +308,41 @@ fn clear_window(_pid: u64, wid: WindowId) -> u64 {
     0
 }
 
+fn add_widget(pid: u64, wid: WindowId, kind: u64, xy_packed: u64, wh_packed: u64) -> u64 {
+    // Verify ownership
+    {
+        let ds = DISPLAY_SERVER.lock();
+        match ds.as_ref().and_then(|d| d.windows.get(&wid)) {
+            Some(info) if info.owner_pid == pid => {}
+            _ => return u64::MAX,
+        }
+    }
+
+    let x = (xy_packed >> 16) as usize & 0xFFFF;
+    let y = (xy_packed & 0xFFFF) as usize;
+    let w = (wh_packed >> 16) as usize & 0xFFFF;
+    let h = (wh_packed & 0xFFFF) as usize;
+
+    let mut desktop = super::desktop::DESKTOP.lock();
+    if let Some(d) = desktop.as_mut() {
+        if let Some(win) = d.wm.get_mut(wid) {
+            use super::widget::{Widget, WidgetKind, Button, AppCommand};
+            win.use_widgets = true;
+            let id = win.widgets.len() as u8;
+            
+            let widget_kind = match kind {
+                0 => WidgetKind::Button(Button::new("Button", win.accent, AppCommand::ButtonClicked(id))),
+                _ => return u64::MAX,
+            };
+
+            win.widgets.push(Widget::new(id, x, y, w, h, widget_kind));
+            win.dirty = true;
+            return id as u64;
+        }
+    }
+    u64::MAX
+}
+
 // ═══════════════════════════════════════════════════════════════
 //  Event delivery
 // ═══════════════════════════════════════════════════════════════
@@ -338,17 +375,35 @@ pub fn route_key_event(wid: WindowId, ascii: u8, scancode: u8) {
 
 /// Route a mouse click event to the display server.
 pub fn route_mouse_click(wid: WindowId, x: u16, y: u16, button: u8) {
-    let mut ds = DISPLAY_SERVER.lock();
-    let ds = match ds.as_mut() {
+    let mut ds_guard = DISPLAY_SERVER.lock();
+    let ds = match ds_guard.as_mut() {
         Some(d) => d,
         None => return,
     };
     if let Some(info) = ds.windows.get(&wid) {
         let pid = info.owner_pid;
+        
+        // Check if a widget was clicked
+        let mut widget_id = 0xFFu32;
+        let mut desktop = super::desktop::DESKTOP.lock();
+        if let Some(d) = desktop.as_mut() {
+            if let Some(win) = d.wm.get_mut(wid) {
+                // Adjust coordinates relative to content area
+                // (Simplified: assuming x,y already relative to content)
+                for widget in &win.widgets {
+                    if widget.contains(x as usize, y as usize) {
+                        widget_id = widget.id as u32;
+                        break;
+                    }
+                }
+            }
+        }
+        drop(desktop);
+
         let event = DisplayEvent {
             event_type: EVENT_MOUSE_CLICK,
             window_id: wid as u32,
-            data: [x as u32, y as u32, button as u32, 0],
+            data: [x as u32, y as u32, widget_id, button as u32],
         };
         ds.event_queues.entry(pid).or_insert_with(VecDeque::new).push_back(event);
     }

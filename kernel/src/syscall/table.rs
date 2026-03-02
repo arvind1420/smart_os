@@ -3,7 +3,7 @@
 /// These define the ABI between threads/processes and the kernel.
 
 /// Total number of syscalls.
-pub const SYSCALL_COUNT: usize = 71;
+pub const SYSCALL_COUNT: usize = 72;
 
 // ── Process syscalls (0-9) ──
 pub const SYS_EXIT: usize = 0;
@@ -88,3 +88,6 @@ pub const SYS_GETHOSTBYNAME: usize = 69;
 
 // ── System Info syscall (70) ──
 pub const SYS_SYSINFO: usize = 70;
+
+// ── Kernel Module syscall (71) ──
+pub const SYS_KMOD_LOAD: usize = 71;

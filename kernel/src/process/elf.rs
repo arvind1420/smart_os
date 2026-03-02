@@ -43,7 +43,44 @@ pub struct Elf64ProgramHeader {
     pub p_align: u64,
 }
 
+/// ELF64 section header.
+#[repr(C, packed)]
+#[derive(Debug, Copy, Clone)]
+pub struct Elf64SectionHeader {
+    pub sh_name: u32,
+    pub sh_type: u32,
+    pub sh_flags: u64,
+    pub sh_addr: u64,
+    pub sh_offset: u64,
+    pub sh_size: u64,
+    pub sh_link: u32,
+    pub sh_info: u32,
+    pub sh_addralign: u64,
+    pub sh_entsize: u64,
+}
+
+pub const SHT_SYMTAB: u32 = 2;
+pub const SHT_STRTAB: u32 = 3;
+pub const SHT_RELA: u32 = 4;
+pub const SHT_DYNSYM: u32 = 11;
+
+/// ELF64 Dynamic entry.
+#[repr(C, packed)]
+#[derive(Debug, Copy, Clone)]
+pub struct Elf64Dyn {
+    pub d_tag: i64,
+    pub d_val: u64,
+}
+
+pub const DT_NULL: i64 = 0;
+pub const DT_STRTAB: i64 = 5;
+pub const DT_SYMTAB: i64 = 6;
+pub const DT_RELA: i64 = 7;
+pub const DT_RELASZ: i64 = 8;
+pub const DT_RELAENT: i64 = 9;
+
 const PT_LOAD: u32 = 1;
+const PT_DYNAMIC: u32 = 2;
 const PF_X: u32 = 1;
 const PF_W: u32 = 2;
 #[allow(dead_code)]

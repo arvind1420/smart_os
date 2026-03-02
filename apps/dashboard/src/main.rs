@@ -1,10 +1,11 @@
 #![no_std]
 #![no_main]
 
-use smartsdk::gui::Window;
+use smartsdk::gui::{Window, EVENT_MOUSE_CLICK};
 use smartsdk::sysinfo::get_sysinfo;
 use smartsdk::io::print;
 use smartsdk::format_buf;
+use smartsdk::kmod;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
@@ -12,8 +13,26 @@ pub extern "C" fn _start() -> ! {
 
     if let Some(win) = Window::new(400, 300) {
         win.draw_text(10, 10, "--- SYSTEM DASHBOARD ---");
+        
+        let load_btn_id = win.add_button(10, 120, 120, 30);
+        win.draw_text(20, 127, "Load Driver");
 
         loop {
+            // Check for events
+            while let Some(ev) = Window::poll_event() {
+                if ev.event_type == EVENT_MOUSE_CLICK {
+                    let btn_id = ev.data[2] as u8;
+                    if btn_id == load_btn_id {
+                        print("Dashboard: Loading test driver...\n");
+                        if kmod::load_module("/drivers/test_driver.sys") {
+                            win.draw_text(10, 160, "Driver Loaded OK!");
+                        } else {
+                            win.draw_text(10, 160, "Driver Load Failed");
+                        }
+                    }
+                }
+            }
+
             if let Some(info) = get_sysinfo() {
                 let mut buf1 = [0u8; 64];
                 let mut buf2 = [0u8; 64];
@@ -30,12 +49,10 @@ pub extern "C" fn _start() -> ! {
                 win.draw_text(10, 80, thread_str);
                 win.draw_text(10, 100, uptime_str);
             }
-
-            // Wait ~1 second before refreshing
-            for _ in 0..10_000_000 { core::hint::spin_loop(); }
+            
+            for _ in 0..5_000_000 { core::hint::spin_loop(); }
         }
     }
 
     smartsdk::syscall::exit(0);
 }
-

@@ -458,6 +458,24 @@ extern "C" fn syscall_dispatcher(frame: *const SyscallFrame) -> u64 {
                 u64::MAX
             }
         }
+        SYS_DISPLAY_CMD => {
+            let pid = crate::process::scheduler::current_pid().unwrap_or(0);
+            crate::gui::display_server::handle_cmd(pid, frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8)
+        }
+        SYS_DISPLAY_EVENT => {
+            let pid = crate::process::scheduler::current_pid().unwrap_or(0);
+            let buf_ptr = frame.rdi;
+            if buf_ptr >= 0x0000_8000_0000_0000 { return u64::MAX; }
+            if let Some(ev) = crate::gui::display_server::poll_event(pid) {
+                let bytes = ev.to_bytes();
+                unsafe {
+                    core::ptr::copy_nonoverlapping(bytes.as_ptr(), buf_ptr as *mut u8, 20);
+                }
+                1
+            } else {
+                0
+            }
+        }
         SYS_SYSINFO => {
             let buf_ptr = frame.rdi;
             let buf_len = frame.rsi as usize;
@@ -468,6 +486,22 @@ extern "C" fn syscall_dispatcher(frame: *const SyscallFrame) -> u64 {
             match crate::syscall::handlers::sys_sysinfo(buf) {
                 Ok(n) => n as u64,
                 Err(_) => u64::MAX,
+            }
+        }
+        SYS_KMOD_LOAD => {
+            let path_ptr = frame.rdi;
+            let path_len = frame.rsi as usize;
+            if path_ptr >= 0x0000_8000_0000_0000 || path_len > 256 {
+                return u64::MAX;
+            }
+            let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len) };
+            if let Ok(path) = core::str::from_utf8(path_bytes) {
+                match crate::syscall::handlers::sys_kmod_load(path) {
+                    Ok(()) => 0,
+                    Err(_) => u64::MAX,
+                }
+            } else {
+                u64::MAX
             }
         }
         SYS_DUP2 => {

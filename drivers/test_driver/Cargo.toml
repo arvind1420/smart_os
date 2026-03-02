@@ -1,0 +1,10 @@
+[package]
+name = "test_driver"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "test_driver"
+path = "src/lib.rs"
+
+[dependencies]

@@ -107,3 +107,10 @@ pub fn sys_sysinfo(buf: &mut [u8]) -> Result<usize, &'static str> {
     
     Ok(40) // 5 * 8 bytes
 }
+
+/// Load a kernel module.
+pub fn sys_kmod_load(path: &str) -> Result<(), &'static str> {
+    let data = crate::vfs::read_file_full(path)?;
+    let name = path.rsplit('/').next().unwrap_or(path);
+    crate::process::kmod::load_module(name, &data)
+}

@@ -8,6 +8,7 @@ use alloc::vec::Vec;
 use super::theme::*;
 use super::compositor::Compositor;
 use super::widget::{Widget, WidgetEvent, WidgetAction};
+use crate::drivers::drm::FramebufferObj;
 
 /// Unique window identifier.
 pub type WindowId = u64;
@@ -47,6 +48,11 @@ pub struct Window {
     /// Whether this window is visible.
     pub visible: bool,
 
+    /// Hardware-backed framebuffer for this window (if DRM active).
+    pub hardware_fb: Option<FramebufferObj>,
+    /// Whether the window deco/content needs to be re-rendered to hardware_fb.
+    pub dirty: bool,
+
     // ── Phase 4: Widget support ──
 
     /// Interactive widgets in the content area.
@@ -65,6 +71,19 @@ pub struct Window {
 impl Window {
     /// Create a new window.
     pub fn new(title: &str, x: usize, y: usize, width: usize, height: usize, accent: Color) -> Self {
+        let mut hardware_fb = None;
+        
+        // Try to allocate a hardware framebuffer for this window
+        let mut drm = crate::drivers::drm::DRM.lock();
+        if let Some(ref mut driver) = drm.active_driver {
+            // Allocate a buffer slightly larger than content to account for borders/title
+            let tw = width + BORDER_WIDTH * 2;
+            let th = height + TITLEBAR_HEIGHT + BORDER_WIDTH * 2;
+            if let Ok(fb) = driver.alloc_framebuffer(tw as u32, th as u32, 0) {
+                hardware_fb = Some(fb);
+            }
+        }
+
         Self {
             id: alloc_window_id(),
             title: String::from(title),
@@ -81,17 +100,21 @@ impl Window {
             focused_widget: None,
             use_widgets: false,
             pre_snap_bounds: None,
+            hardware_fb,
+            dirty: true,
         }
     }
 
     /// Add a text line to the window content (legacy mode).
     pub fn add_line(&mut self, text: &str) {
         self.content_lines.push(String::from(text));
+        self.dirty = true;
     }
 
     /// Clear all content.
     pub fn clear_content(&mut self) {
         self.content_lines.clear();
+        self.dirty = true;
     }
 
     /// Total height including title bar and borders.
@@ -237,20 +260,42 @@ impl Window {
     }
 
     /// Render this window to the compositor.
-    pub fn render(&self, comp: &mut Compositor) {
+    pub fn render(&mut self, comp: &mut Compositor) {
         if !self.visible || self.state == WindowState::Minimized {
             return;
         }
 
+        // Hardware Acceleration Path: Render to window's own FB then blit to screen
+        if let Some(fb) = self.hardware_fb {
+            if self.dirty {
+                // Temporarily target the window's FB for rendering
+                comp.push_target(Some(fb));
+                
+                // Render at relative (0,0)
+                self.render_internal(comp, 0, 0);
+                
+                comp.pop_target();
+                self.dirty = false;
+            }
+            
+            // Blit the cached window FB to the main screen back buffer
+            comp.hardware_blit(fb.id, self.x as u32, self.y as u32, self.total_width() as u32, self.total_height() as u32);
+            return;
+        }
+
+        // Software Path: Render directly to screen back buffer
+        self.render_internal(comp, self.x, self.y);
+    }
+
+    /// Internal render logic — can be used for both direct and cached rendering.
+    fn render_internal(&self, comp: &mut Compositor, wx: usize, wy: usize) {
         let border_color = if self.active { BORDER_GLOW } else { BORDER_INACTIVE };
         let titlebar_bg = if self.active { BG_TITLEBAR_ACTIVE } else { BG_TITLEBAR };
 
-        let wx = self.x;
-        let wy = self.y;
         let tw = self.total_width();
         let th = self.total_height();
 
-        // ── Glow border (neon effect — outer layers) ──
+        // ── Glow border (neon effect) ──
         if self.active {
             comp.draw_glow_border(wx, wy, tw, th, self.accent, GLOW_SIZE);
         }
@@ -264,7 +309,7 @@ impl Window {
         let tb_w = self.width;
         comp.fill_rect(tb_x, tb_y, tb_w, TITLEBAR_HEIGHT, titlebar_bg);
 
-        // ── Title bar accent line (top of title bar — thin neon strip) ──
+        // ── Title bar accent line ──
         comp.hline(tb_x, tb_y, tb_w, self.accent.dim(if self.active { 255 } else { 80 }));
 
         // ── Window title text ──
@@ -273,16 +318,12 @@ impl Window {
         let title_color = if self.active { TEXT_PRIMARY } else { TEXT_SECONDARY };
         comp.draw_text(title_x, title_y, &self.title, title_color);
 
-        // ── Close button (neon red dot) ──
+        // ── Buttons ──
         let close_x = tb_x + tb_w - 16;
         let close_y = tb_y + (TITLEBAR_HEIGHT.saturating_sub(8)) / 2;
         comp.fill_rect(close_x, close_y, 8, 8, ACCENT_RED);
-
-        // ── Minimize button (neon orange dot) ──
         let min_x = close_x - 14;
         comp.fill_rect(min_x, close_y, 8, 8, ACCENT_ORANGE);
-
-        // ── Maximize button (neon green dot) ──
         let max_x = min_x - 14;
         comp.fill_rect(max_x, close_y, 8, 8, ACCENT_GREEN);
 
@@ -301,7 +342,7 @@ impl Window {
             self.render_content_lines(comp, content_x, content_y);
         }
 
-        // ── Resize grip (bottom-right corner, 3 small dots) ──
+        // ── Resize grip ──
         let grip_color = if self.active { BORDER_GLOW } else { BORDER_INACTIVE };
         let gx = wx + tw - 10;
         let gy = wy + th - 10;
@@ -310,15 +351,32 @@ impl Window {
         comp.fill_rect(gx + 6, gy + 2, 2, 2, grip_color);
     }
 
-    /// Render legacy content_lines text.
+    /// Render legacy content_lines text with absolute position parsing.
     fn render_content_lines(&self, comp: &mut Compositor, content_x: usize, content_y: usize) {
         let text_x = content_x + 6;
         let mut text_y = content_y + 4;
         let max_lines = (self.height.saturating_sub(8)) / 18;
+        
         for (i, line) in self.content_lines.iter().enumerate() {
-            if i >= max_lines {
-                break;
+            if line.starts_with('@') {
+                // Format: @x:y text
+                if let Some(pos) = line.find(' ') {
+                    let coords = &line[1..pos];
+                    if let Some(colon) = coords.find(':') {
+                        let rx: usize = coords[..colon].parse().unwrap_or(0);
+                        let ry: usize = coords[colon+1..].parse().unwrap_or(0);
+                        comp.draw_text(content_x + rx, content_y + ry, &line[pos+1..], TEXT_PRIMARY);
+                    }
+                }
+                continue;
             }
+            if line.starts_with("!rect") {
+                // Format: !rect x:y wxh #rrggbb
+                // (Simplified parsing for demo)
+                continue;
+            }
+
+            if i >= max_lines { break; }
             comp.draw_text(text_x, text_y, line, TEXT_PRIMARY);
             text_y += 18;
         }
@@ -373,8 +431,8 @@ impl WindowManager {
     }
 
     /// Render all windows in z-order.
-    pub fn render_all(&self, comp: &mut Compositor) {
-        for window in &self.windows {
+    pub fn render_all(&mut self, comp: &mut Compositor) {
+        for window in &mut self.windows {
             window.render(comp);
         }
     }
