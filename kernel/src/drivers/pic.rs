@@ -124,7 +124,9 @@ pub fn init() {
         pics.unmask(0);
         pics.unmask(1);
         pics.unmask(2);   // Cascade — required for PIC2 interrupts to reach CPU
+        pics.unmask(3);   // COM2/4
+        pics.unmask(4);   // COM1/3
         pics.unmask(12);  // PS/2 mouse
     }
-    crate::serial_println!("[drivers] PIC initialized (IRQ0,1,2,12 unmasked).");
+    crate::serial_println!("[drivers] PIC initialized (IRQ0,1,2,3,4,12 unmasked).");
 }

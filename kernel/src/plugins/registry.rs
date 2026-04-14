@@ -191,6 +191,9 @@ fn keyboard_plugin_entry() {
     crate::serial_println!("[plugin:keyboard-input] Keyboard input plugin running.");
     loop {
         if let Some(event) = crate::drivers::keyboard::read_key() {
+            if let Some(ascii) = event.ascii {
+                crate::serial_println!("[kbd] key pressed: ascii={} pressed={}", ascii as char, event.pressed);
+            }
             crate::gui::handle_key_event(event);
         }
         crate::process::scheduler::yield_now();

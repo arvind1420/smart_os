@@ -268,6 +268,67 @@ fn compute_vaddr(_l4_idx: usize, vaddr_base: u64, _level: u8, idx: usize) -> u64
     vaddr_base | (idx as u64) << 12
 }
 
+/// Translate a user virtual address to a kernel virtual address pointing to the same physical frame.
+/// This acts as a safe memory check before accessing user memory in the kernel.
+pub fn translate_user_addr(user_vaddr: u64) -> Result<u64, &'static str> {
+    if user_vaddr >= 0x0000_8000_0000_0000 {
+        return Err("Address is not in user space");
+    }
+    let (cr3_frame, _) = Cr3::read();
+    let virt = phys_to_virt(cr3_frame.start_address());
+    let l4_table: &mut PageTable = unsafe { &mut *virt.as_mut_ptr() };
+    let page_table = unsafe { OffsetPageTable::new(l4_table, phys_offset()) };
+    
+    use x86_64::structures::paging::Translate;
+    match page_table.translate_addr(VirtAddr::new(user_vaddr)) {
+        Some(phys_addr) => Ok(phys_to_virt(phys_addr).as_u64()),
+        None => Err("User address not mapped"),
+    }
+}
+
+/// Safely copy data from user space to kernel space, traversing page boundaries.
+pub fn copy_from_user(mut dst: &mut [u8], mut src_vaddr: u64) -> Result<(), &'static str> {
+    while !dst.is_empty() {
+        let kernel_vaddr = translate_user_addr(src_vaddr)?;
+        let page_offset = src_vaddr & 0xFFF;
+        let bytes_to_copy = (4096 - page_offset).min(dst.len() as u64) as usize;
+        
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                kernel_vaddr as *const u8,
+                dst.as_mut_ptr(),
+                bytes_to_copy,
+            );
+        }
+        
+        dst = &mut dst[bytes_to_copy..];
+        src_vaddr += bytes_to_copy as u64;
+    }
+    Ok(())
+}
+
+/// Safely copy data from kernel space to user space, traversing page boundaries.
+pub fn copy_to_user(mut dst_vaddr: u64, mut src: &[u8]) -> Result<(), &'static str> {
+    while !src.is_empty() {
+        let kernel_vaddr = translate_user_addr(dst_vaddr)?;
+        // Ideally we should also check if the page is WRITABLE
+        let page_offset = dst_vaddr & 0xFFF;
+        let bytes_to_copy = (4096 - page_offset).min(src.len() as u64) as usize;
+        
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                src.as_ptr(),
+                kernel_vaddr as *mut u8,
+                bytes_to_copy,
+            );
+        }
+        
+        src = &src[bytes_to_copy..];
+        dst_vaddr += bytes_to_copy as u64;
+    }
+    Ok(())
+}
+
 /// Map anonymous pages into a user address space.
 /// Allocates physical frames and maps them at the given virtual address.
 /// Returns the actual mapped address.

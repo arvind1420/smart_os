@@ -5,12 +5,15 @@
 /// If the anomaly score exceeds the threshold AND mass file operations are
 /// detected, the process is frozen.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use spin::Mutex;
 use crate::process::Pid;
+
+/// Queue for offloading anomaly detection to background cores.
+pub static ANOMALY_QUEUE: Mutex<VecDeque<(Pid, Vec<i8>)>> = Mutex::new(VecDeque::new());
 
 /// Ring buffer size for syscall history per process.
 const SYSCALL_HISTORY_SIZE: usize = 64;
@@ -66,7 +69,7 @@ impl ProcessMonitor {
     }
 
     /// Record a syscall. Returns true if the process should be frozen.
-    pub fn record_syscall(&mut self, nr: u8) -> bool {
+    pub fn record_syscall(&mut self, pid: Pid, nr: u8) -> bool {
         // Write to ring buffer
         self.syscall_ring[self.ring_pos % SYSCALL_HISTORY_SIZE] = nr;
         self.ring_pos += 1;
@@ -101,18 +104,10 @@ impl ProcessMonitor {
         }
 
         // AI anomaly detection every ANOMALY_CHECK_INTERVAL syscalls
+        // Offload to background core instead of blocking the user thread
         if self.total_calls % ANOMALY_CHECK_INTERVAL == 0 {
             let features = self.extract_features();
-            self.last_score = run_anomaly_model(&features);
-            if self.last_score > FREEZE_THRESHOLD {
-                self.flagged = true;
-                crate::serial_println!(
-                    "[security] AI ALERT: Anomaly score {:.2} exceeds threshold {:.2}",
-                    self.last_score,
-                    FREEZE_THRESHOLD,
-                );
-                return true;
-            }
+            ANOMALY_QUEUE.lock().push_back((pid, features));
         }
 
         false
@@ -218,13 +213,48 @@ impl ProcessMonitor {
 pub static MONITORS: Mutex<BTreeMap<Pid, ProcessMonitor>> = Mutex::new(BTreeMap::new());
 
 /// Initialize the security monitor.
-/// Registers the anomaly detection AI model.
+/// Registers the anomaly detection AI model and spawns background worker.
 pub fn init() {
     // Register the anomaly detection model with the AI engine
     let model = create_anomaly_model();
     let mut engine = crate::ai::inference::ENGINE.lock();
     if let Some(eng) = engine.as_mut() {
         eng.register_model(model);
+    }
+    drop(engine); // drop lock before spawning thread
+    
+    // Spawn background worker thread
+    crate::process::scheduler::spawn("anomaly-worker", anomaly_worker_thread, 4);
+}
+
+/// Worker thread that pops features from the queue and runs the AI model.
+fn anomaly_worker_thread() {
+    loop {
+        let job = {
+            let mut q = ANOMALY_QUEUE.lock();
+            q.pop_front()
+        };
+        
+        if let Some((pid, features)) = job {
+            let score = run_anomaly_model(&features);
+            
+            let mut monitors = MONITORS.lock();
+            if let Some(monitor) = monitors.get_mut(&pid) {
+                monitor.last_score = score;
+                if score > FREEZE_THRESHOLD {
+                    monitor.flagged = true;
+                    crate::serial_println!(
+                        "[security] AI ALERT: Background monitor flagged pid {} with score {:.2}",
+                        pid, score
+                    );
+                    drop(monitors); // Drop before freezing
+                    freeze_process(pid);
+                }
+            }
+        } else {
+            // Wait for work
+            crate::process::scheduler::yield_now();
+        }
     }
 }
 
@@ -237,7 +267,7 @@ pub fn on_syscall(pid: Pid, syscall_nr: u8) -> bool {
 
     let mut monitors = MONITORS.lock();
     let monitor = monitors.entry(pid).or_insert_with(ProcessMonitor::new);
-    monitor.record_syscall(syscall_nr)
+    monitor.record_syscall(pid, syscall_nr)
 }
 
 /// Freeze a process: mark all its threads as Blocked in the scheduler.

@@ -91,3 +91,8 @@ pub const SYS_SYSINFO: usize = 70;
 
 // ── Kernel Module syscall (71) ──
 pub const SYS_KMOD_LOAD: usize = 71;
+
+// ── Tensor API (Phase 18) (80-82) ──
+pub const SYS_TENSOR_CREATE: usize = 80;
+pub const SYS_TENSOR_OP: usize = 81;
+pub const SYS_TENSOR_DESTROY: usize = 82;

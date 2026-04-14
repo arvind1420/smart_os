@@ -33,13 +33,13 @@ pub fn prefetch_cycle() {
         }
 
         // "Pre-load" the app data by reading its VFS entry.
-        // For kernel apps (terminal, file-manager, sysmon) this is a no-op
-        // since they are compiled into the kernel. For user-space ELFs,
-        // reading the binary touches VFS pages and warms the cache.
+        // We read the entire file in chunks to ensure it's fully cached in memory.
         let elf_path = alloc::format!("/bin/{}", app_name);
         if let Ok(fd) = crate::vfs::open(&elf_path) {
             let mut buf = [0u8; 4096];
-            let _ = crate::vfs::read(fd, &mut buf);
+            while let Ok(n) = crate::vfs::read(fd, &mut buf) {
+                if n == 0 { break; }
+            }
             crate::vfs::close(fd).ok();
         }
 

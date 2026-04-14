@@ -8,6 +8,7 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 /// A frame buffer object (a chunk of video memory).
+#[derive(Debug, Clone, Copy)]
 pub struct FramebufferObj {
     pub id: u32,
     pub width: u32,
@@ -15,9 +16,11 @@ pub struct FramebufferObj {
     pub pitch: u32,
     pub bpp: u8,
     pub phys_addr: u64,
+    pub virt_addr: u64,
 }
 
 /// A display output (connector/monitor).
+#[derive(Debug, Clone)]
 pub struct Connector {
     pub id: u32,
     pub connected: bool,
@@ -25,7 +28,7 @@ pub struct Connector {
 }
 
 /// A display mode (resolution & refresh rate).
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct DisplayMode {
     pub width: u32,
     pub height: u32,

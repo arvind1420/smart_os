@@ -6,18 +6,9 @@
 use spin::Mutex;
 use alloc::vec::Vec;
 use super::pci;
-// Intel e1000 PCI IDs
-pub const INTEL_VENDOR: u16 = 0x8086;
-pub const E1000_DEV_82540EM: u16 = 0x100E;
-pub const E1000_DEV_82574L: u16 = 0x10D3;
-pub const E1000_DEV_82577LM: u16 = 0x10EA;
 
-// Register Offsets
+// NVMe Register Offsets
 const REG_CTRL: u32 = 0x0000;
-const REG_STATUS: u32 = 0x0008;
-const REG_EERD: u32 = 0x0014;
-const REG_ICR: u32 = 0x00C0;
-const REG_IMS: u32 = 0x00D0;
 const REG_IMC: u32 = 0x00D8;
 const REG_RCTL: u32 = 0x0100;
 const REG_TCTL: u32 = 0x0400;
@@ -38,12 +29,6 @@ const REG_RAH0: u32 = 0x5404;
 // RCTL Flags
 const RCTL_EN: u32 = 1 << 1;
 const RCTL_SBP: u32 = 1 << 2;
-const RCTL_UPE: u32 = 1 << 3;
-const RCTL_MPE: u32 = 1 << 4;
-const RCTL_LPE: u32 = 1 << 5;
-const RCTL_LBM_NONE: u32 = 0 << 6;
-const RCTL_RDMTS_HALF: u32 = 0 << 8;
-const RCTL_MO_36: u32 = 0 << 12;
 const RCTL_BAM: u32 = 1 << 15;
 const RCTL_BSIZE_2048: u32 = 0 << 16;
 const RCTL_SECRC: u32 = 1 << 26;
@@ -57,7 +42,6 @@ const TCTL_COLD_SHIFT: u32 = 12;
 // Descriptor Definitions
 const NUM_TX_DESCRIPTORS: usize = 256;
 const NUM_RX_DESCRIPTORS: usize = 256;
-const RX_BUFFER_SIZE: usize = 2048;
 
 #[repr(C, packed)]
 struct TxDescriptor {
@@ -111,10 +95,14 @@ unsafe fn write_reg(base: u64, offset: u32, value: u32) {
 
 /// Initialize the e1000 network device.
 pub fn init() -> Result<(), &'static str> {
-    let supported_devs = [E1000_DEV_82540EM, E1000_DEV_82574L, E1000_DEV_82577LM];
+    let supported_devs = [
+        0x100E, // E1000_DEV_82540EM
+        0x10D3, // E1000_DEV_82574L
+        0x10EA, // E1000_DEV_82577LM
+    ];
     let mut found_dev = None;
     for &dev_id in &supported_devs {
-        if let Some(dev) = pci::find_device(INTEL_VENDOR, dev_id) {
+        if let Some(dev) = pci::find_device(0x8086, dev_id) {
             found_dev = Some(dev);
             break;
         }
@@ -154,13 +142,10 @@ pub fn init() -> Result<(), &'static str> {
     
     let mut rx_buffers_virt = Vec::with_capacity(NUM_RX_DESCRIPTORS);
     for i in 0..NUM_RX_DESCRIPTORS {
-        // Allocate 2048 bytes (half a frame) per descriptor
-        // To simplify, we'll just allocate one 4KB frame per 2 descriptors.
         let buf_frame = crate::memory::frame::alloc_frame().ok_or("No frame for RX buffer")?;
         let buf_phys = buf_frame.start_address().as_u64();
         let buf_virt = phys_offset + buf_phys;
 
-        // Descriptor 0 (first half of frame)
         unsafe {
             let desc = rx_descriptors.add(i);
             (*desc).addr = buf_phys;
@@ -239,7 +224,6 @@ pub fn send_frame(frame: &[u8]) -> Result<(), &'static str> {
     let tx_idx = dev.tx_next;
     let desc = unsafe { &mut *dev.tx_descriptors.add(tx_idx) };
 
-    // Get physical address of the frame payload
     let phys_offset = crate::memory::paging::phys_offset().as_u64();
     let frame_phys = (frame.as_ptr() as u64) - phys_offset;
 
@@ -248,13 +232,11 @@ pub fn send_frame(frame: &[u8]) -> Result<(), &'static str> {
     desc.cmd = (1 << 0) | (1 << 1) | (1 << 3); // EOP | IFCS | RS (Report Status)
     desc.status = 0;
 
-    // Advance tail pointer
     dev.tx_next = (tx_idx + 1) % NUM_TX_DESCRIPTORS;
     unsafe {
         write_reg(dev.mmio_base, REG_TDT, dev.tx_next as u32);
     }
 
-    // Wait for transmit to complete (status DD bit 0 set)
     let mut timeout = 100000;
     while (unsafe { core::ptr::read_volatile(&desc.status) } & 0x01) == 0 {
         timeout -= 1;
@@ -275,24 +257,19 @@ pub fn recv_frame(buf: &mut [u8]) -> Result<usize, &'static str> {
     let rx_idx = dev.rx_next;
     let desc = unsafe { &mut *dev.rx_descriptors.add(rx_idx) };
 
-    // Check if packet received (status DD bit 0 set)
     if (unsafe { core::ptr::read_volatile(&desc.status) } & 0x01) == 0 {
-        return Ok(0); // No packet
+        return Ok(0);
     }
 
     let len = desc.length as usize;
     let copy_len = len.min(buf.len());
 
-    // Copy from the RX buffer
     let buf_virt = dev.rx_buffers_virt[rx_idx];
     unsafe {
         core::ptr::copy_nonoverlapping(buf_virt as *const u8, buf.as_mut_ptr(), copy_len);
     }
 
-    // Clear status and reset descriptor
     desc.status = 0;
-
-    // Advance tail and update RDT to allow hardware to reuse this descriptor
     dev.rx_next = (rx_idx + 1) % NUM_RX_DESCRIPTORS;
     unsafe {
         write_reg(dev.mmio_base, REG_RDT, rx_idx as u32);

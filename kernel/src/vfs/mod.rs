@@ -45,6 +45,34 @@ fn fat_subpath(path: &str) -> &str {
     }
 }
 
+/// Check if a path should be routed to the NTFS filesystem.
+fn is_ntfs_path(path: &str) -> bool {
+    path == "/ntfs" || path.starts_with("/ntfs/")
+}
+
+/// Extract the subpath from an NTFS path (strip `/ntfs/` prefix).
+fn ntfs_subpath(path: &str) -> &str {
+    if path.starts_with("/ntfs/") {
+        &path[6..]
+    } else {
+        ""
+    }
+}
+
+/// Check if a path should be routed to a character device.
+fn is_dev_path(path: &str) -> bool {
+    path.starts_with("/dev/")
+}
+
+/// Extract the device name from a path (strip `/dev/` prefix).
+fn dev_name(path: &str) -> &str {
+    if path.starts_with("/dev/") {
+        &path[5..]
+    } else {
+        ""
+    }
+}
+
 /// Initialize the VFS with a ramfs root.
 pub fn init() {
     let mut fs = ramfs::RamFs::new();
@@ -56,6 +84,14 @@ pub fn init() {
     fs.mkdir("/home").ok();
     fs.mkdir("/tmp").ok();
     fs.mkdir("/dev").ok();
+    fs.mkdir("/ntfs").ok();
+
+    // Create device nodes in VFS for enumeration
+    fs.create_file("/dev/ttyS0", b"").ok();
+    fs.create_file("/dev/ttyS1", b"").ok();
+    fs.create_file("/dev/ttyS2", b"").ok();
+    fs.create_file("/dev/ttyS3", b"").ok();
+    fs.create_file("/dev/lp0", b"").ok();
 
     // Create system files
     fs.create_file("/system/version", b"Smart OS v0.8.0\n").ok();
@@ -86,6 +122,31 @@ pub fn init() {
 
 /// Open a file, returning a file descriptor.
 pub fn open(path: &str) -> Result<usize, &'static str> {
+    if is_dev_path(path) {
+        let name = dev_name(path);
+        let inode_base = 0xA000_0000;
+        let id = match name {
+            "ttyS0" => 0,
+            "ttyS1" => 1,
+            "ttyS2" => 2,
+            "ttyS3" => 3,
+            "lp0" => 4,
+            _ => return Err("Device not found"),
+        };
+        let mut fdt = FD_TABLE.lock();
+        let table = fdt.as_mut().ok_or("FD table not initialized")?;
+        return Ok(table.open(inode_base + id, path));
+    }
+    if is_ntfs_path(path) {
+        let sub = ntfs_subpath(path);
+        if !crate::drivers::ntfs::is_available() {
+            return Err("NTFS not mounted");
+        }
+        let mut fdt = FD_TABLE.lock();
+        let table = fdt.as_mut().ok_or("FD table not initialized")?;
+        // Use 0x8000_0000 base for NTFS inodes
+        return Ok(table.open(0x8000_0000, path));
+    }
     if is_fat_path(path) {
         let sub = fat_subpath(path);
         if !crate::drivers::fat32::is_available() {
@@ -140,6 +201,21 @@ pub fn read(fd_num: usize, buf: &mut [u8]) -> Result<usize, &'static str> {
     let offset = fd.offset;
     let path = fd.path.clone();
     drop(fdt);
+
+    if inode_id >= 0xA000_0000 {
+        // ... (device handling)
+    }
+
+    if inode_id >= 0x8000_0000 && inode_id < 0x9000_0000 {
+        // NTFS file
+        let sub = ntfs_subpath(&path);
+        let ntfs = crate::drivers::ntfs::NTFS.lock();
+        let data = ntfs.as_ref().ok_or("NTFS not mounted")?.read_file(sub)?;
+        let remaining = if offset < data.len() { data.len() - offset } else { 0 };
+        let count = remaining.min(buf.len());
+        buf[..count].copy_from_slice(&data[offset..offset + count]);
+        return Ok(count);
+    }
 
     if inode_id >= 0x9000_0000 {
         // FAT32 file
@@ -211,6 +287,27 @@ pub fn write(fd_num: usize, data: &[u8]) -> Result<usize, &'static str> {
     let inode_id = fd.inode_id;
     let path = fd.path.clone();
     drop(fdt);
+
+    if inode_id >= 0xA000_0000 {
+        // Character device
+        let id = inode_id - 0xA000_0000;
+        return match id {
+            0..=3 => {
+                crate::drivers::uart::write_com(id as usize, data)?;
+                Ok(data.len())
+            }
+            4 => {
+                // LPT write
+                let mut lpt = crate::drivers::lpt::LPT1.lock();
+                for &byte in data {
+                    lpt.write_data(byte);
+                    lpt.strobe();
+                }
+                Ok(data.len())
+            }
+            _ => Err("Invalid device ID"),
+        };
+    }
 
     if inode_id >= 0x9000_0000 {
         // FAT32 file write
@@ -321,4 +418,49 @@ pub fn create_and_write(path: &str, data: &[u8]) -> Result<(), &'static str> {
         }
         Ok(())
     }
+}
+
+/// Delete a file from the filesystem.
+pub fn delete_file(path: &str) -> Result<(), &'static str> {
+    // Only supported on ramfs for now
+    if is_disk_path(path) || is_fat_path(path) {
+        return Err("delete not supported on this filesystem");
+    }
+    let mut vfs = VFS.lock();
+    let fs = vfs.as_mut().ok_or("VFS not initialized")?;
+    fs.delete(path)
+}
+
+/// Read an entire file into a Vec.
+pub fn read_file_full(path: &str) -> Result<Vec<u8>, &'static str> {
+    if is_fat_path(path) {
+        let sub = fat_subpath(path);
+        return crate::drivers::fat32::read_file(sub);
+    }
+    if is_disk_path(path) {
+        let name = disk_filename(path);
+        let diskfs = crate::drivers::diskfs::DISK_FS.lock();
+        let fs = diskfs.as_ref().ok_or("Disk not mounted")?;
+        return fs.read_file(name);
+    }
+    
+    let vfs = VFS.lock();
+    let fs = vfs.as_ref().ok_or("VFS not initialized")?;
+    let inode_id = fs.lookup(path).ok_or("File not found")?;
+    let stat = fs.stat(path)?;
+    
+    // Extract size from stat
+    let size = if let smartpack::Value::Map(map) = stat {
+        map.iter().find(|(k, _)| {
+            if let smartpack::Value::String(s) = k { s == "size" } else { false }
+        }).and_then(|(_, v)| {
+            if let smartpack::Value::UInt64(n) = v { Some(*n as usize) } else { None }
+        }).unwrap_or(0)
+    } else {
+        0
+    };
+
+    let mut data = alloc::vec![0u8; size];
+    fs.read(inode_id, 0, &mut data)?;
+    Ok(data)
 }

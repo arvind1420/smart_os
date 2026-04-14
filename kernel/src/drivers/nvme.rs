@@ -281,6 +281,14 @@ impl NvmeController {
     }
 }
 
+pub fn is_available() -> bool {
+    !NVME_DEVICES.lock().is_empty()
+}
+
+pub fn capacity() -> u64 {
+    NVME_DEVICES.lock().first().map(|d| d.capacity()).unwrap_or(0)
+}
+
 pub fn init() {
     if let Some(dev) = pci::find_by_class(PCI_CLASS_MASS_STORAGE, PCI_SUBCLASS_NVME, PCI_PROGIF_NVME) {
         let mut ctrl = NvmeController::new(dev);

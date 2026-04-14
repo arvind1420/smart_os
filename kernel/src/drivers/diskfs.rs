@@ -21,24 +21,95 @@ const DATA_START: u64 = 69;
 const MAX_NAME_LEN: usize = 120;
 const SECTOR_SIZE: usize = 512;
 
-fn read_sector_internal(lba: u64, buf: &mut [u8; 512]) -> Result<(), &'static str> {
-    // Try NVMe first
-    let mut nvme_list = nvme::NVME_DEVICES.lock();
-    if let Some(ctrl) = nvme_list.get_mut(0) {
-        use super::BlockDevice;
-        return ctrl.read_blocks(lba, buf);
+pub struct EncryptionEngine {
+    pub key: [u8; 32],
+    pub enabled: bool,
+}
+
+impl EncryptionEngine {
+    pub fn encrypt(&self, _lba: u64, data: &mut [u8]) {
+        if !self.enabled { return; }
+        for i in 0..data.len() { data[i] ^= self.key[i % 32]; }
     }
+    pub fn decrypt(&self, _lba: u64, data: &mut [u8]) {
+        if !self.enabled { return; }
+        for i in 0..data.len() { data[i] ^= self.key[i % 32]; }
+    }
+}
+
+pub static ENCRYPTION: spin::Mutex<EncryptionEngine> = spin::Mutex::new(EncryptionEngine {
+    key: [0x55; 32],
+    enabled: false,
+});
+
+fn read_sector_internal(lba: u64, buf: &mut [u8; 512]) -> Result<(), &'static str> {
+    let mut success = false;
+    
+    // Try NVMe first
+    {
+        let mut nvme_list = nvme::NVME_DEVICES.lock();
+        if let Some(ctrl) = nvme_list.get_mut(0) {
+            use super::BlockDevice;
+            if ctrl.read_blocks(lba, buf).is_ok() { success = true; }
+        }
+    }
+
+    // Try AHCI second
+    if !success {
+        let mut ahci_list = super::ahci::AHCI_CONTROLLERS.lock();
+        if let Some(ctrl) = ahci_list.get_mut(0) {
+            if let Some(port) = ctrl.ports.get_mut(0) {
+                if port.read_sectors(lba, buf).is_ok() { success = true; }
+            }
+        }
+    }
+
+    // Try Legacy IDE third
+    if !success {
+        let mut ide_ctrl = super::ide::IDE.lock();
+        if !ide_ctrl.drives.is_empty() {
+            if ide_ctrl.read_sectors(0, lba, buf).is_ok() { success = true; }
+        }
+    }
+
     // Fallback to VirtIO
-    virtio_blk::read_sector(lba, buf)
+    if !success {
+        virtio_blk::read_sector(lba, buf)?;
+    }
+
+    ENCRYPTION.lock().decrypt(lba, buf);
+    Ok(())
 }
 
 fn write_sector_internal(lba: u64, buf: &[u8; 512]) -> Result<(), &'static str> {
-    let mut nvme_list = nvme::NVME_DEVICES.lock();
-    if let Some(ctrl) = nvme_list.get_mut(0) {
-        use super::BlockDevice;
-        return ctrl.write_blocks(lba, buf);
+    let mut encrypted_buf = *buf;
+    ENCRYPTION.lock().encrypt(lba, &mut encrypted_buf);
+
+    // Try NVMe first
+    {
+        let mut nvme_list = nvme::NVME_DEVICES.lock();
+        if let Some(ctrl) = nvme_list.get_mut(0) {
+            use super::BlockDevice;
+            return ctrl.write_blocks(lba, &encrypted_buf);
+        }
     }
-    virtio_blk::write_sector(lba, buf)
+
+    // Try AHCI second
+    let mut ahci_list = super::ahci::AHCI_CONTROLLERS.lock();
+    if let Some(ctrl) = ahci_list.get_mut(0) {
+        if let Some(port) = ctrl.ports.get_mut(0) {
+            use super::BlockDevice;
+            return port.write_blocks(lba, &encrypted_buf);
+        }
+    }
+
+    // Try Legacy IDE third
+    let mut ide_ctrl = super::ide::IDE.lock();
+    if !ide_ctrl.drives.is_empty() {
+        return ide_ctrl.write_sectors(0, lba, &encrypted_buf);
+    }
+
+    virtio_blk::write_sector(lba, &encrypted_buf)
 }
 
 /// On-disk superblock.
@@ -263,6 +334,35 @@ pub fn init() {
             available = true;
             total = ctrl.capacity();
             crate::serial_println!("[diskfs] Using NVMe primary.");
+        }
+    }
+    if !available {
+        let ahci_list = super::ahci::AHCI_CONTROLLERS.lock();
+        if let Some(ctrl) = ahci_list.get(0) {
+            if let Some(port) = ctrl.ports.get(0) {
+                use super::BlockDevice;
+                available = true;
+                // Treat AHCI port as block device to get capacity
+                total = 1024 * 1024 * 200; // 100GB dummy for now
+                crate::serial_println!("[diskfs] Using AHCI primary.");
+            }
+        }
+    }
+    if !available {
+        if super::xhci::is_available() {
+            let devices = super::xhci::device_list();
+            if let Some(usb_dev) = devices.iter().find(|d| d.is_mass_storage) {
+                available = true;
+                total = 1024 * 1024 * 32; // 16GB dummy for USB
+                crate::serial_println!("[diskfs] Using USB Mass Storage (slot {}) primary.", usb_dev.slot_id);
+            }
+        }
+    }
+    if !available {
+        if super::ide::is_available() {
+            available = true;
+            total = super::ide::IDE.lock().drives[0].sectors;
+            crate::serial_println!("[diskfs] Using Legacy IDE primary.");
         }
     }
     if !available && virtio_blk::is_available() {

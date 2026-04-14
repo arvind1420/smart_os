@@ -1,86 +1,20 @@
 /// Global Descriptor Table (GDT) setup for Smart OS.
 ///
-/// The GDT defines memory segments for the CPU. In long mode (64-bit),
-/// segmentation is mostly unused, but we still need:
-/// - Kernel code segment (ring 0) — index 1, selector 0x08
-/// - Kernel data segment (ring 0) — index 2, selector 0x10
-/// - User data segment (ring 3)   — index 3, selector 0x18
-/// - User code segment (ring 3)   — index 4, selector 0x20
-/// - Task State Segment (TSS)     — index 5-6, selector 0x28
-///
-/// The ordering (user_data before user_code) is required for SYSRET:
-///   STAR[63:48] = 0x10 → SYSRET loads SS = 0x10+8|3 = 0x1B, CS = 0x10+16|3 = 0x23
+/// Each core has its own GDT and TSS to support SMP context switching.
 
-use spin::Lazy;
 use x86_64::structures::gdt::{Descriptor, GlobalDescriptorTable, SegmentSelector};
 use x86_64::structures::tss::TaskStateSegment;
 use x86_64::VirtAddr;
+use super::percpu::PerCpu;
 
 /// Index of the double-fault handler stack in the IST (Interrupt Stack Table).
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 
 /// Size of the interrupt/privilege stacks (16 KiB each).
-const STACK_SIZE: usize = 4096 * 4;
-
-/// Static storage for the TSS. We need mutable access to update RSP0
-/// when switching to user-mode threads, so we use `static mut` instead
-/// of wrapping in Lazy<>.
-static mut TSS_STORAGE: TaskStateSegment = TaskStateSegment::new();
-
-/// Whether TSS has been initialized (one-time setup).
-static TSS_INIT: Lazy<()> = Lazy::new(|| {
-    // SAFETY: This runs exactly once during lazy init, before any other
-    // access to TSS_STORAGE. We use raw pointers to avoid shared-reference-
-    // to-static-mut issues in Rust 2024.
-    unsafe {
-        let tss_ptr = &raw mut TSS_STORAGE;
-
-        // Double-fault IST entry.
-        (*tss_ptr).interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = {
-            static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
-            let stack_start = VirtAddr::from_ptr(&raw const STACK);
-            stack_start + STACK_SIZE as u64
-        };
-
-        // Privilege stack for ring 0 (used when interrupts fire from ring 3).
-        (*tss_ptr).privilege_stack_table[0] = {
-            static mut PRIV_STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
-            let stack_start = VirtAddr::from_ptr(&raw const PRIV_STACK);
-            stack_start + STACK_SIZE as u64
-        };
-    }
-});
-
-/// The GDT and its segment selectors.
-static GDT: Lazy<(GlobalDescriptorTable, Selectors)> = Lazy::new(|| {
-    // Ensure TSS is initialized before creating the GDT.
-    Lazy::force(&TSS_INIT);
-
-    let mut gdt = GlobalDescriptorTable::new();
-
-    let kernel_code = gdt.append(Descriptor::kernel_code_segment()); // 0x08
-    let kernel_data = gdt.append(Descriptor::kernel_data_segment()); // 0x10
-    let user_data = gdt.append(Descriptor::user_data_segment());     // 0x18
-    let user_code = gdt.append(Descriptor::user_code_segment());     // 0x20
-    // SAFETY: TSS_STORAGE was initialized by TSS_INIT above, and we only
-    // mutate privilege_stack_table[0] with interrupts disabled (single CPU).
-    let tss_ref = unsafe { &*(&raw const TSS_STORAGE) };
-    let tss = gdt.append(Descriptor::tss_segment(tss_ref)); // 0x28
-
-    (
-        gdt,
-        Selectors {
-            kernel_code,
-            kernel_data,
-            user_code,
-            user_data,
-            tss,
-        },
-    )
-});
+pub const STACK_SIZE: usize = 4096 * 4;
 
 /// Segment selectors for the loaded GDT.
-#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
 pub struct Selectors {
     pub kernel_code: SegmentSelector,
     pub kernel_data: SegmentSelector,
@@ -89,30 +23,104 @@ pub struct Selectors {
     pub tss: SegmentSelector,
 }
 
-/// Initialize the GDT, load it into the CPU, and set segment registers.
+/// Create a new GDT for the given TSS.
+pub fn create_gdt(tss: &'static TaskStateSegment) -> (GlobalDescriptorTable, Selectors) {
+    let mut gdt = GlobalDescriptorTable::new();
+    let kernel_code = gdt.append(Descriptor::kernel_code_segment());
+    let kernel_data = gdt.append(Descriptor::kernel_data_segment());
+    let user_data = gdt.append(Descriptor::user_data_segment());
+    let user_code = gdt.append(Descriptor::user_code_segment());
+    let tss_sel = gdt.append(Descriptor::tss_segment(tss));
+
+    (
+        gdt,
+        Selectors {
+            kernel_code,
+            kernel_data,
+            user_code,
+            user_data,
+            tss: tss_sel,
+        },
+    )
+}
+
+/// Global BSP PerCpu structure.
+pub static mut BSP_PER_CPU: Option<PerCpu> = None;
+/// Global BSP GDT.
+pub static mut BSP_GDT: Option<GlobalDescriptorTable> = None;
+
+/// Initialize the GDT for the BSP (Boot Strap Processor).
 pub fn init() {
     use x86_64::instructions::segmentation::{CS, DS, Segment};
     use x86_64::instructions::tables::load_tss;
 
-    GDT.0.load();
-
     unsafe {
-        CS::set_reg(GDT.1.kernel_code);
-        DS::set_reg(GDT.1.kernel_data);
-        load_tss(GDT.1.tss);
+        let mut pcpu = PerCpu::new(0);
+        // Temporary stack for BSP initialization until scheduler takes over
+        static mut BSP_STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
+        let stack_top = (&raw const BSP_STACK as u64) + STACK_SIZE as u64;
+        
+        pcpu.init(stack_top);
+        let pcpu_ptr = &raw mut BSP_PER_CPU;
+        (*pcpu_ptr) = Some(pcpu);
+        
+        let pcpu_ref = (*pcpu_ptr).as_mut().unwrap();
+        let (gdt, selectors) = create_gdt(&pcpu_ref.tss);
+        
+        let gdt_ptr = &raw mut BSP_GDT;
+        (*gdt_ptr) = Some(gdt);
+        (*gdt_ptr).as_ref().unwrap().load();
+        
+        CS::set_reg(selectors.kernel_code);
+        DS::set_reg(selectors.kernel_data);
+        load_tss(selectors.tss);
+        
+        // Store selectors in PerCpu
+        pcpu_ref.selectors = Some(selectors);
+        
+        // Set GS_BASE to point to PerCpu
+        set_percpu_base(pcpu_ref as *const _ as u64);
     }
 }
 
-/// Update the TSS RSP0 (privilege level 0 stack pointer).
-///
-/// This must be called before switching to a user-mode thread so that
-/// when an interrupt fires in ring 3, the CPU loads this kernel stack.
-///
-/// # Safety
-/// Must be called with interrupts disabled (during context switch).
-pub unsafe fn set_tss_rsp0(stack_top: VirtAddr) {
-    let tss_ptr = &raw mut TSS_STORAGE;
+/// Initialize GDT for an AP (Application Processor).
+/// This is called from the AP entry point.
+pub fn init_ap(pcpu: &'static mut PerCpu, gdt: &'static mut GlobalDescriptorTable) {
+    use x86_64::instructions::segmentation::{CS, DS, Segment};
+    use x86_64::instructions::tables::load_tss;
+
+    gdt.load();
+    
+    let selectors = pcpu.selectors.expect("AP selectors not initialized");
+    
     unsafe {
-        (*tss_ptr).privilege_stack_table[0] = stack_top;
+        CS::set_reg(selectors.kernel_code);
+        DS::set_reg(selectors.kernel_data);
+        load_tss(selectors.tss);
+        
+        set_percpu_base(pcpu as *const _ as u64);
     }
+}
+
+/// Set the GS_BASE MSR to point to the PerCpu structure.
+pub unsafe fn set_percpu_base(addr: u64) {
+    let low = (addr & 0xFFFF_FFFF) as u32;
+    let high = (addr >> 32) as u32;
+    core::arch::asm!(
+        "wrmsr",
+        in("ecx") 0xC000_0101u32, // GS_BASE
+        in("eax") low,
+        in("edx") high,
+    );
+}
+
+/// Update the TSS RSP0 for the CURRENT CPU.
+pub unsafe fn set_tss_rsp0(stack_top: VirtAddr) {
+    // We can access the current PerCpu via GS
+    let pcpu: *mut PerCpu;
+    core::arch::asm!(
+        "mov {}, gs:[0]", // GS:[0] is self_ptr
+        out(reg) pcpu,
+    );
+    (*pcpu).tss.privilege_stack_table[0] = stack_top;
 }

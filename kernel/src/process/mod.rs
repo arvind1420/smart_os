@@ -14,12 +14,15 @@ pub mod signal;
 pub mod smp_balance;
 pub mod strace;
 pub mod wait;
+pub mod container;
 pub mod fd;
 pub mod userprogs;
 pub mod posix;
 pub mod sigdeliver;
 pub mod asm_builder;
 pub mod kmod;
+pub mod pe;
+pub mod migration;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -48,5 +51,6 @@ pub enum ThreadState {
 pub fn init() {
     process::init();
     scheduler::init();
+    migration::init();
     crate::serial_println!("[process] Process subsystem initialized.");
 }

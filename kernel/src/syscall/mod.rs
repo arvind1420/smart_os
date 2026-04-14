@@ -5,6 +5,7 @@
 
 pub mod table;
 pub mod handlers;
+pub mod linux;
 
 /// Initialize the syscall subsystem.
 pub fn init() {

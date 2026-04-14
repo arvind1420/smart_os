@@ -398,9 +398,11 @@ impl ScrollableText {
             let line_idx = self.scroll_offset + i;
             if line_idx >= self.lines.len() { break; }
             let (ref text, color) = self.lines[line_idx];
-            // Truncate long lines
-            if text.len() > max_chars {
-                comp.draw_text(text_x, text_y, &text[..max_chars], color);
+            // Truncate long lines (use char boundary to handle multi-byte UTF-8)
+            let char_count = text.chars().count();
+            if char_count > max_chars {
+                let byte_end = text.char_indices().nth(max_chars).map(|(i, _)| i).unwrap_or(text.len());
+                comp.draw_text(text_x, text_y, &text[..byte_end], color);
             } else {
                 comp.draw_text(text_x, text_y, text, color);
             }

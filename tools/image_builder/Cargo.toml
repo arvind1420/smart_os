@@ -8,3 +8,6 @@ description = "Build tool that creates bootable UEFI disk images for Smart OS"
 
 [dependencies]
 bootloader = "0.11"
+fatfs = "0.3"
+gpt = "3.0"
+mbrman = "0.5"

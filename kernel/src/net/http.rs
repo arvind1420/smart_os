@@ -6,7 +6,9 @@
 
 use alloc::format;
 use alloc::string::String;
+use alloc::borrow::ToOwned;
 use alloc::vec;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::serial_println;
 
@@ -258,4 +260,80 @@ fn echo_server_thread() {
         }
         crate::process::scheduler::yield_now();
     }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  HTTP Client (GET)
+// ═══════════════════════════════════════════════════════════════
+
+pub struct HttpResponse {
+    pub status: u16,
+    pub body: String,
+}
+
+/// Perform a simple HTTP/1.0 GET request.
+/// URL format: "host/path" or "host:port/path"
+pub fn get(url: &str) -> Result<HttpResponse, &'static str> {
+    // Strip http:// prefix
+    let url = url.trim_start_matches("http://").trim_start_matches("https://");
+
+    // Split host and path
+    let (host_port, path) = if let Some(slash) = url.find('/') {
+        (&url[..slash], &url[slash..])
+    } else {
+        (url, "/")
+    };
+
+    // Parse host and port
+    let (host_str, port) = if let Some(colon) = host_port.find(':') {
+        let p = host_port[colon+1..].parse::<u16>().unwrap_or(80);
+        (&host_port[..colon], p)
+    } else {
+        (host_port, 80u16)
+    };
+
+    // Resolve host to IP via DNS
+    let dest_ip = super::dns::resolve(host_str).map_err(|_| "DNS resolution failed")?;
+
+    // Open TCP connection
+    let conn_id = super::tcp::connect(dest_ip, port, 5000)?;
+
+    // Send HTTP/1.0 GET request
+    let request = format!(
+        "GET {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        path, host_str
+    );
+    super::tcp::send(conn_id, request.as_bytes())?;
+
+    // Read response
+    let mut response_bytes: Vec<u8> = Vec::new();
+    let mut buf = vec![0u8; 1024];
+    let mut attempts = 0;
+    loop {
+        match super::tcp::recv(conn_id, &mut buf) {
+            Ok(0) => { attempts += 1; if attempts > 100 { break; } crate::process::scheduler::yield_now(); }
+            Ok(n) => { response_bytes.extend_from_slice(&buf[..n]); attempts = 0; }
+            Err(_) => break,
+        }
+    }
+    let _ = super::tcp::close(conn_id);
+
+    let response_str = String::from_utf8_lossy(&response_bytes).into_owned();
+
+    // Parse status line
+    let status = response_str.lines().next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(0);
+
+    // Split headers and body
+    let body = if let Some(pos) = response_str.find("\r\n\r\n") {
+        response_str[pos + 4..].to_owned()
+    } else if let Some(pos) = response_str.find("\n\n") {
+        response_str[pos + 2..].to_owned()
+    } else {
+        response_str.clone()
+    };
+
+    Ok(HttpResponse { status, body })
 }

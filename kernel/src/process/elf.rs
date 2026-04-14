@@ -89,6 +89,7 @@ const PF_R: u32 = 4;
 pub struct LoadedElf {
     pub entry_point: u64,
     pub highest_addr: u64,
+    pub is_linux: bool,
 }
 
 /// Load an ELF64 binary into a user-space page table.
@@ -119,6 +120,9 @@ pub fn load_elf(
     if header.e_machine != 0x3E {
         return Err("Not x86_64 ELF");
     }
+
+    // ABI Detection: 0 = System V (usually Linux), 3 = Linux
+    let is_linux = header.e_ident[7] == 0 || header.e_ident[7] == 3;
 
     let entry = header.e_entry;
     let mut highest = 0u64;
@@ -214,5 +218,6 @@ pub fn load_elf(
     Ok(LoadedElf {
         entry_point: entry,
         highest_addr: highest,
+        is_linux,
     })
 }

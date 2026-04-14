@@ -128,13 +128,14 @@ pub fn handle_key_event(event: crate::drivers::keyboard::KeyEvent) {
     let mut desktop = DESKTOP.lock();
     let desk = match desktop.as_mut() {
         Some(d) => d,
-        None => return,
+        None => { crate::serial_println!("[kbd] no desktop"); return; }
     };
 
     let active_id = match desk.wm.active_id() {
         Some(id) => id,
-        None => return,
+        None => { crate::serial_println!("[kbd] no active window"); return; }
     };
+    crate::serial_println!("[kbd] routing to window {}", active_id);
 
     let window = match desk.wm.get_mut(active_id) {
         Some(w) => w,

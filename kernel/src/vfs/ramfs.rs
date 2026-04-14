@@ -141,6 +141,28 @@ impl RamFs {
         let inode = self.inodes.get(&inode_id).ok_or("Inode not found")?;
         Ok(inode.to_smartpack())
     }
+
+    /// Remove a file from the filesystem.
+    pub fn delete(&mut self, path: &str) -> Result<(), &'static str> {
+        let &inode_id = self.path_map.get(path).ok_or("Path not found")?;
+        {
+            let inode = self.inodes.get(&inode_id).ok_or("Inode not found")?;
+            if inode.inode_type == super::inode::InodeType::Directory {
+                return Err("is a directory");
+            }
+        }
+        // Remove from parent's children list
+        if let Some(parent_path) = path_parent(path) {
+            if let Some(&parent_id) = self.path_map.get(parent_path) {
+                if let Some(parent) = self.inodes.get_mut(&parent_id) {
+                    parent.children.retain(|&c| c != inode_id);
+                }
+            }
+        }
+        self.inodes.remove(&inode_id);
+        self.path_map.remove(path);
+        Ok(())
+    }
 }
 
 /// Extract the filename from a path.

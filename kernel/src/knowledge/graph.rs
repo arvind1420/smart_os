@@ -345,3 +345,11 @@ pub fn node_count() -> usize {
 pub fn edge_count() -> usize {
     GRAPH.lock().as_ref().map(|g| g.edge_count()).unwrap_or(0)
 }
+
+/// Broadcast an update to the distributed knowledge graph cluster.
+/// Phase 18: In a full implementation, this uses UDP broadcast or TCP 
+/// to sync graph mutations across multiple Smart OS nodes.
+pub fn broadcast_update(node_id: NodeId) {
+    crate::serial_println!("[kg] Broadcasting node {} update to cluster (Phase 18 placeholder)", node_id);
+    // e.g. crate::net::udp::send(b"255.255.255.255", 9999, ...);
+}

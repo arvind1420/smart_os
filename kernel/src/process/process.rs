@@ -38,6 +38,8 @@ pub struct Process {
     pub exit_code: Option<i32>,
     /// Child process IDs.
     pub children: Vec<Pid>,
+    /// Whether this process follows the Linux ABI.
+    pub is_linux: bool,
 }
 
 /// Global process table.
@@ -62,11 +64,12 @@ impl Process {
             parent_pid: 0,
             exit_code: None,
             children: Vec::new(),
+            is_linux: false,
         }
     }
 
     /// Create a new user process with its own address space.
-    pub fn new_user(name: &str, pml4: PhysFrame<Size4KiB>) -> Self {
+    pub fn new_user(name: &str, pml4: PhysFrame<Size4KiB>, is_linux: bool) -> Self {
         let pid = alloc_pid();
         // Create per-process FD table
         super::fd::create_fd_table(pid);
@@ -81,6 +84,7 @@ impl Process {
             parent_pid: 0,
             exit_code: None,
             children: Vec::new(),
+            is_linux,
         }
     }
 }

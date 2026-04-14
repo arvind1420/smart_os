@@ -10,6 +10,7 @@ pub mod metadata;
 pub mod classify;
 pub mod chunking;
 pub mod compression;
+pub mod journal;
 
 use alloc::vec::Vec;
 use metadata::SmartMetadata;
@@ -17,7 +18,8 @@ use metadata::SmartMetadata;
 /// Initialize SmartFS.
 pub fn init() {
     chunking::init();
-    crate::serial_println!("[smartfs] SmartFS initialized (CDC + compression + classify).");
+    journal::init(1000, 1024); // Initialize journal with 1024 blocks starting at LBA 1000
+    crate::serial_println!("[smartfs] SmartFS initialized (CDC + compression + classify + journal).");
 }
 
 /// Store a file through SmartFS with classification, compression, and dedup.

@@ -6,6 +6,7 @@
 use spin::Mutex;
 use super::pci;
 use super::virtio::{self, Virtqueue, VIRTQ_DESC_F_WRITE};
+use super::BlockDevice;
 
 /// VirtIO block request types.
 const VIRTIO_BLK_T_IN: u32 = 0;  // read
@@ -40,6 +41,36 @@ pub struct VirtioBlkDevice {
 
 // Safety: used behind Mutex
 unsafe impl Send for VirtioBlkDevice {}
+
+impl BlockDevice for VirtioBlkDevice {
+    fn read_blocks(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), &'static str> {
+        let count = buf.len() / SECTOR_SIZE;
+        for i in 0..count {
+            let offset = i * SECTOR_SIZE;
+            let sector_buf: &mut [u8; SECTOR_SIZE] = (&mut buf[offset..offset + SECTOR_SIZE])
+                .try_into().map_err(|_| "slice conversion failed")?;
+            do_request(self, VIRTIO_BLK_T_IN, sector + i as u64, sector_buf)?;
+        }
+        Ok(())
+    }
+
+    fn write_blocks(&mut self, sector: u64, buf: &[u8]) -> Result<(), &'static str> {
+        let count = buf.len() / SECTOR_SIZE;
+        for i in 0..count {
+            let offset = i * SECTOR_SIZE;
+            let sector_buf: &[u8; SECTOR_SIZE] = (&buf[offset..offset + SECTOR_SIZE])
+                .try_into().map_err(|_| "slice conversion failed")?;
+            // cast to mut for do_request
+            let buf_mut = unsafe { core::slice::from_raw_parts_mut(sector_buf.as_ptr() as *mut u8, SECTOR_SIZE) };
+            do_request(self, VIRTIO_BLK_T_OUT, sector + i as u64, buf_mut)?;
+        }
+        Ok(())
+    }
+
+    fn capacity(&self) -> u64 {
+        self.capacity_sectors
+    }
+}
 
 /// Initialize the VirtIO block device.
 pub fn init() -> Result<(), &'static str> {

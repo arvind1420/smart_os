@@ -54,19 +54,19 @@ impl Thread {
         // Set up the initial stack frame so that when we "return" to this
         // thread, it starts executing at `entry`.
         // We push a fake context that thread_switch will pop.
-        let initial_sp = stack_top - 8 * 7; // 7 callee-saved registers + return addr
+        // Stack layout must match thread_switch's pop order:
+        //   thread_switch pops: rbx, rbp, r12, r13, r14, r15, then ret.
+        // So sp+0 = rbx (first pop), sp+48 = return address (ret target).
+        let initial_sp = stack_top - 8 * 7;
         unsafe {
             let sp = initial_sp as *mut u64;
-            // Return address — when thread_switch does `ret`, it jumps here
-            core::ptr::write(sp.add(6), thread_entry_trampoline as *const () as u64);
-            // RBX = entry function pointer (we'll use it in the trampoline)
-            core::ptr::write(sp.add(5), entry as *const () as u64);
-            // RBP, R12-R15 = 0
-            core::ptr::write(sp.add(4), 0u64); // rbp
-            core::ptr::write(sp.add(3), 0u64); // r12
-            core::ptr::write(sp.add(2), 0u64); // r13
-            core::ptr::write(sp.add(1), 0u64); // r14
-            core::ptr::write(sp.add(0), 0u64); // r15
+            core::ptr::write(sp.add(0), entry as *const () as u64); // rbx = fn_ptr
+            core::ptr::write(sp.add(1), 0u64); // rbp
+            core::ptr::write(sp.add(2), 0u64); // r12
+            core::ptr::write(sp.add(3), 0u64); // r13
+            core::ptr::write(sp.add(4), 0u64); // r14
+            core::ptr::write(sp.add(5), 0u64); // r15
+            core::ptr::write(sp.add(6), thread_entry_trampoline as *const () as u64); // ret
         }
 
         Thread {

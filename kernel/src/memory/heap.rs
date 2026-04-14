@@ -7,12 +7,18 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use linked_list_allocator::LockedHeap;
 use crate::serial_println;
 
-/// Initial kernel heap size: 1 MiB.
-const HEAP_SIZE: u64 = 1024 * 1024;
+/// Initial kernel heap size: 32 MiB.
+const HEAP_SIZE: u64 = 32 * 1024 * 1024;
 
 /// Physical end address of the heap region (set during init).
 /// The frame allocator uses this to know which frames are reserved.
 pub static HEAP_PHYS_END: AtomicU64 = AtomicU64::new(0);
+
+/// Returns true once the heap allocator has been initialized.
+#[inline]
+pub fn is_heap_ready() -> bool {
+    HEAP_PHYS_END.load(core::sync::atomic::Ordering::Relaxed) != 0
+}
 
 /// The global allocator used by `alloc::` types in the kernel.
 #[global_allocator]

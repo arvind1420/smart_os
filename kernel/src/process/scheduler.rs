@@ -77,8 +77,8 @@ pub fn spawn_user_process(name: &str, elf_path: &str) -> Result<super::Pid, &'st
         loaded.entry_point, loaded.highest_addr
     );
 
-    // 4. Set up user stack: 16 pages (64 KB) at 0x7FFF_FFFF_0000.
-    let user_stack_top = 0x7FFF_FFFF_0000u64;
+    // 4. Set up user stack with ASLR
+    let user_stack_top = crate::memory::aslr::randomize_stack_top();
     let user_stack_pages = 16usize;
     let user_stack_bottom = user_stack_top - (user_stack_pages as u64) * 4096;
     let stack_flags = PageTableFlags::PRESENT
@@ -88,7 +88,7 @@ pub fn spawn_user_process(name: &str, elf_path: &str) -> Result<super::Pid, &'st
     crate::memory::paging::map_range(pml4, user_stack_bottom, user_stack_pages, stack_flags)?;
 
     // 5. Create process.
-    let mut proc = super::process::Process::new_user(name, pml4);
+    let mut proc = super::process::Process::new_user(name, pml4, loaded.is_linux);
     let pid = proc.pid;
 
     // 6. Create user thread.
@@ -98,7 +98,19 @@ pub fn spawn_user_process(name: &str, elf_path: &str) -> Result<super::Pid, &'st
 
     // 7. Register process and enqueue thread.
     super::process::PROCESS_TABLE.lock().insert(pid, proc);
+    let tid = thread.tid;
     SCHEDULER.lock().ready_queue.push_back(thread);
+    
+    // Create strict sandbox (CAP_MINIMAL by default)
+    let caps = if name == "sh" || name == "guihello" || name == "httpd" {
+        crate::security::sandbox::caps::CAP_ALL // Legacy bypass for built-ins
+    } else {
+        crate::security::sandbox::caps::CAP_MINIMAL
+    };
+    crate::security::sandbox::create_sandbox(pid, name, caps);
+
+    // SMP distribution
+    super::smp_balance::assign_thread(tid);
 
     crate::serial_println!("[scheduler] User process '{}' (pid={}) spawned.", name, pid);
     Ok(pid)
@@ -248,7 +260,13 @@ pub fn preempt(interrupted_rsp: u64) -> bool {
         None => return false,
     };
 
-    let mut new_thread = match sched.ready_queue.pop_front() {
+    // The timer ISR preemption path uses "pop 15 GPRs + iretq", which only
+    // works for user threads that have the full 20-item interrupt-context
+    // stack layout.  Kernel threads yield cooperatively; skip them here.
+    let new_thread_opt = sched.ready_queue.iter().position(|t| t.is_user)
+        .map(|i| sched.ready_queue.remove(i).unwrap());
+
+    let mut new_thread = match new_thread_opt {
         Some(t) => t,
         None => {
             old_thread.state = ThreadState::Running;
@@ -441,11 +459,15 @@ pub fn blocked_count() -> usize {
 pub fn fork_current_thread(child_pid: u64, child_cr3: u64) -> u64 {
     use super::thread::{USER_CODE_SEL, USER_DATA_SEL};
 
-    // Read the parent's saved user state from SYSCALL_CPU_DATA
-    let (user_rsp, kernel_rsp) = unsafe {
-        let cpu_data = &raw const crate::arch::x86_64::syscall_entry::SYSCALL_CPU_DATA;
-        ((*cpu_data).user_rsp, (*cpu_data).kernel_rsp)
-    };
+    // Read the parent's saved user state from PerCpu via GS
+    let user_rsp: u64;
+    let kernel_rsp: u64;
+    unsafe {
+        let pcpu: *const crate::arch::x86_64::percpu::PerCpu;
+        core::arch::asm!("mov {}, gs:[0]", out(reg) pcpu);
+        user_rsp = (*pcpu).user_rsp;
+        kernel_rsp = (*pcpu).kernel_rsp;
+    }
 
     // We need to get the parent's saved RCX (user RIP) and R11 (user RFLAGS)
     // from the syscall entry stub's stack frame. The kernel stack currently has:

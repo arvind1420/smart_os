@@ -6,9 +6,24 @@
 
 use spin::Mutex;
 use uart_16550::SerialPort;
+use alloc::string::String;
+use alloc::collections::VecDeque;
 
 /// Global serial port, protected by a spinlock.
 pub static SERIAL1: Mutex<Option<SerialPort>> = Mutex::new(None);
+
+/// Ring buffer holding the last 200 serial log lines for dmesg.
+pub static SERIAL_LOG: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
+
+pub fn get_log() -> String {
+    let log = SERIAL_LOG.lock();
+    let mut out = String::new();
+    for line in log.iter() {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
 
 /// Initialize the serial port on COM1.
 pub fn init() {
@@ -20,12 +35,22 @@ pub fn init() {
 #[doc(hidden)]
 pub fn _print(args: core::fmt::Arguments) {
     use core::fmt::Write;
-    // Disable interrupts while writing to prevent deadlocks
+    // Always write to serial port — no heap needed, safe before heap init.
     x86_64::instructions::interrupts::without_interrupts(|| {
         if let Some(ref mut serial) = *SERIAL1.lock() {
-            serial.write_fmt(args).expect("serial write failed");
+            serial.write_fmt(args).ok();
         }
     });
+    // Only append to ring buffer after the heap allocator is ready.
+    if crate::memory::heap::is_heap_ready() {
+        use alloc::string::ToString;
+        let s = alloc::format!("{}", args);
+        let mut log = SERIAL_LOG.lock();
+        for line in s.lines() {
+            if log.len() >= 200 { log.pop_front(); }
+            log.push_back(line.to_string());
+        }
+    }
 }
 
 /// Print to the serial console.

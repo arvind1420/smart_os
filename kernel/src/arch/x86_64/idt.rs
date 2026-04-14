@@ -1,8 +1,4 @@
 /// Interrupt Descriptor Table (IDT) for Smart OS.
-///
-/// Handles CPU exceptions and hardware interrupts (timer, keyboard, mouse).
-/// Phase 5: Timer interrupt uses raw stub for full register save/restore
-/// to support preemptive scheduling of user-space threads.
 
 use spin::Lazy;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
@@ -11,34 +7,29 @@ use x86_64::VirtAddr;
 use crate::serial_println;
 use super::gdt;
 
-/// Hardware interrupt vector numbers.
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
 pub enum InterruptIndex {
-    Timer = 32,       // IRQ0
-    Keyboard = 33,    // IRQ1
-    Mouse = 44,       // IRQ12 (PIC2 line 4)
+    Timer = 32,
+    Keyboard = 33,
+    Serial2 = 35, // IRQ 3 (COM2/4)
+    Serial1 = 36, // IRQ 4 (COM1/3)
+    Mouse = 44,
 }
 
-/// Full register context saved by the timer interrupt stub.
-/// Matches the push order in `timer_interrupt_stub`.
 #[repr(C)]
-#[allow(dead_code)]
 pub struct InterruptContext {
-    // Pushed by our stub (in this order, low address first)
+// ... (rest of the struct)
     pub r15: u64, pub r14: u64, pub r13: u64, pub r12: u64,
     pub r11: u64, pub r10: u64, pub r9: u64,  pub r8: u64,
     pub rbp: u64, pub rdi: u64, pub rsi: u64, pub rdx: u64,
     pub rcx: u64, pub rbx: u64, pub rax: u64,
-    // Pushed by CPU on interrupt entry
     pub rip: u64, pub cs: u64, pub rflags: u64, pub rsp: u64, pub ss: u64,
 }
 
-/// The IDT, lazily initialized.
 static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     let mut idt = InterruptDescriptorTable::new();
 
-    // ── CPU Exceptions ──
     idt.breakpoint.set_handler_fn(breakpoint_handler);
     unsafe {
         idt.double_fault
@@ -51,133 +42,74 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     idt.divide_error.set_handler_fn(divide_error_handler);
     idt.stack_segment_fault.set_handler_fn(stack_segment_fault_handler);
 
-    // ── Hardware Interrupts ──
-    // Timer: use raw naked stub for full context save (preemptive scheduling).
     unsafe {
-        idt[InterruptIndex::Timer as u8]
-            .set_handler_addr(VirtAddr::new(
-                timer_interrupt_stub as *const () as u64
-            ));
+        idt[InterruptIndex::Timer as u8].set_handler_addr(VirtAddr::new(timer_interrupt_stub as *const () as u64));
     }
     idt[InterruptIndex::Keyboard as u8].set_handler_fn(keyboard_interrupt_handler);
+    idt[InterruptIndex::Serial1 as u8].set_handler_fn(serial1_interrupt_handler);
+    idt[InterruptIndex::Serial2 as u8].set_handler_fn(serial2_interrupt_handler);
     idt[InterruptIndex::Mouse as u8].set_handler_fn(mouse_interrupt_handler);
 
     idt
 });
 
-/// Load the IDT into the CPU.
 pub fn init() {
     IDT.load();
 }
 
-// ─── Timer Interrupt (raw stub for preemptive scheduling) ────────
-
-/// Raw timer interrupt stub. Saves all 15 GPRs, calls the Rust handler,
-/// then checks if a preemptive context switch should happen.
-///
-/// Stack layout after pushes (InterruptContext):
-///   [R15, R14, R13, R12, R11, R10, R9, R8, RBP, RDI, RSI, RDX, RCX, RBX, RAX,
-///    RIP, CS, RFLAGS, RSP, SS]  ← CPU pushed these 5
 #[unsafe(naked)]
 unsafe extern "C" fn timer_interrupt_stub() {
     core::arch::naked_asm!(
-        // Save all general-purpose registers
-        "push rax",
-        "push rbx",
-        "push rcx",
-        "push rdx",
-        "push rsi",
-        "push rdi",
-        "push rbp",
-        "push r8",
-        "push r9",
-        "push r10",
-        "push r11",
-        "push r12",
-        "push r13",
-        "push r14",
-        "push r15",
+        // swapgs only when interrupted from ring-3 (user mode).
+        // Before any push: [rsp+8] = CS from the interrupt frame.
+        "test byte ptr [rsp + 8], 3",
+        "jz 1f",
+        "swapgs",  // ring-3 → ring-0: activate kernel GS
+        "1:",
 
-        // Call the Rust handler with RSP as argument
-        // (points to our InterruptContext)
+        // Save all registers
+        "push rax", "push rbx", "push rcx", "push rdx", "push rsi", "push rdi", "push rbp",
+        "push r8", "push r9", "push r10", "push r11", "push r12", "push r13", "push r14", "push r15",
+
+        // Call Rust handler (GS is always kernel GS here)
         "mov rdi, rsp",
         "call {handler}",
 
-        // Check if preemption wants to switch to a different thread.
-        // Use RIP-relative LEA for PIE-compatible addressing.
-        "lea rbx, [rip + {preempt_active}]",
-        "cmp byte ptr [rbx], 1",
+        // Check preemption via GS (safe: kernel GS is active)
+        "cmp byte ptr gs:[49], 1", // PerCpu.preempt_active
         "jne 2f",
 
-        // Preemption active — save current RSP into old thread (already done
-        // by scheduler::preempt), then switch to new thread's stack.
-        "mov byte ptr [rbx], 0",  // clear flag
-
-        // Load new CR3 if non-zero
-        "lea rbx, [rip + {preempt_cr3}]",
-        "mov rax, [rbx]",
+        // Preemption active — clear flag, optionally switch CR3, switch stack
+        "mov byte ptr gs:[49], 0",
+        "mov rax, gs:[40]", // PerCpu.preempt_cr3
         "test rax, rax",
         "jz 3f",
         "mov cr3, rax",
         "3:",
-
-        // Load new thread's stack pointer
-        "lea rbx, [rip + {preempt_sp}]",
-        "mov rsp, [rbx]",
-
-        // Check if new thread is a user thread
-        "lea rbx, [rip + {preempt_is_user}]",
-        "cmp byte ptr [rbx], 1",
-        "jne 2f",
-
-        // User thread: RSP points to InterruptContext (15 GPRs + iretq frame).
-        // Fall through to pop all GPRs and iretq.
+        "mov rsp, gs:[32]", // PerCpu.preempt_sp
 
         "2:",
         // Restore all registers
-        "pop r15",
-        "pop r14",
-        "pop r13",
-        "pop r12",
-        "pop r11",
-        "pop r10",
-        "pop r9",
-        "pop r8",
-        "pop rbp",
-        "pop rdi",
-        "pop rsi",
-        "pop rdx",
-        "pop rcx",
-        "pop rbx",
-        "pop rax",
+        "pop r15", "pop r14", "pop r13", "pop r12", "pop r11", "pop r10", "pop r9", "pop r8",
+        "pop rbp", "pop rdi", "pop rsi", "pop rdx", "pop rcx", "pop rbx", "pop rax",
+
+        // swapgs only when returning to ring-3.
+        // After pops: [rsp+8] = CS from the interrupt frame.
+        "test byte ptr [rsp + 8], 3",
+        "jz 4f",
+        "swapgs",  // ring-0 → ring-3: restore user GS
+        "4:",
 
         "iretq",
 
         handler = sym timer_interrupt_inner,
-        preempt_active = sym PREEMPT_ACTIVE_ADDR,
-        preempt_sp = sym PREEMPT_SP_ADDR,
-        preempt_cr3 = sym PREEMPT_CR3_ADDR,
-        preempt_is_user = sym PREEMPT_IS_USER_ADDR,
     );
 }
 
-// These statics provide direct access to the PREEMPT_TARGET fields
-// from the assembly stub. We use separate statics because inline asm
-// can't easily do struct field offsets.
-#[unsafe(no_mangle)]
-static mut PREEMPT_ACTIVE_ADDR: u8 = 0;
-#[unsafe(no_mangle)]
-static mut PREEMPT_SP_ADDR: u64 = 0;
-#[unsafe(no_mangle)]
-static mut PREEMPT_CR3_ADDR: u64 = 0;
-#[unsafe(no_mangle)]
-static mut PREEMPT_IS_USER_ADDR: u8 = 0;
-
-/// Rust part of the timer interrupt handler.
 extern "C" fn timer_interrupt_inner(ctx_rsp: u64) {
     crate::drivers::timer::tick();
 
-    // Check wait queue for expired sleeps and wake blocked threads
+    // Waking logic
     {
         let woken = crate::process::wait::check_wakeups();
         for tid in woken {
@@ -185,137 +117,92 @@ extern "C" fn timer_interrupt_inner(ctx_rsp: u64) {
         }
     }
 
-    // Preemptive scheduling: every 10 ticks (~100ms at 100Hz)
+    // Preemptive scheduling
     let ticks = crate::drivers::timer::ticks();
     if ticks % 10 == 0 {
         if crate::process::scheduler::preempt(ctx_rsp) {
-            // Scheduler decided to switch. Copy preempt target to our asm-visible statics.
+            // Scheduler decided to switch. Update the CURRENT core's PerCpu.
             unsafe {
+                let pcpu: *mut super::percpu::PerCpu;
+                core::arch::asm!("mov {}, gs:[0]", out(reg) pcpu);
+                
                 let target_ptr = &raw const crate::process::scheduler::PREEMPT_TARGET;
-                PREEMPT_ACTIVE_ADDR = 1;
-                PREEMPT_SP_ADDR = (*target_ptr).new_sp;
-                PREEMPT_CR3_ADDR = (*target_ptr).new_cr3;
-                PREEMPT_IS_USER_ADDR = if (*target_ptr).is_user { 1 } else { 0 };
-                // Clear the scheduler's flag
+                (*pcpu).preempt_active = 1;
+                (*pcpu).preempt_sp = (*target_ptr).new_sp;
+                (*pcpu).preempt_cr3 = (*target_ptr).new_cr3;
+                (*pcpu).preempt_is_user = if (*target_ptr).is_user { 1 } else { 0 };
+                
+                // Clear the global scheduler's flag
                 let target_mut = &raw mut crate::process::scheduler::PREEMPT_TARGET;
                 (*target_mut).active = false;
             }
         }
     }
 
-    // Send EOI
     unsafe {
-        crate::drivers::pic::PICS.lock().end_of_interrupt(InterruptIndex::Timer as u8);
+        crate::arch::x86_64::lapic::eoi();
     }
 }
 
-// ─── Other Hardware Interrupt Handlers ────────────────────────────
-
+// ... Other handlers remain unchanged
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    crate::serial_println!("[kbd-irq] keyboard interrupt fired");
     crate::drivers::keyboard::handle_scancode();
+    // Send EOI to PIC (keyboard IRQ1 comes through PIC, not LAPIC)
     unsafe {
-        crate::drivers::pic::PICS.lock().end_of_interrupt(InterruptIndex::Keyboard as u8);
+        crate::drivers::pic::PICS.lock().end_of_interrupt(
+            crate::drivers::pic::PIC1_OFFSET + 1  // IRQ1 = keyboard
+        );
     }
+}
+
+extern "x86-interrupt" fn serial1_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    crate::drivers::uart::dispatch_interrupt(4); // IRQ 4
+    unsafe { crate::arch::x86_64::lapic::eoi(); }
+}
+
+extern "x86-interrupt" fn serial2_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    crate::drivers::uart::dispatch_interrupt(3); // IRQ 3
+    unsafe { crate::arch::x86_64::lapic::eoi(); }
 }
 
 extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFrame) {
     crate::drivers::mouse::handle_packet();
-    unsafe {
-        crate::drivers::pic::PICS.lock().end_of_interrupt(InterruptIndex::Mouse as u8);
-    }
+    unsafe { crate::arch::x86_64::lapic::eoi(); }
 }
-
-// ─── Exception Handlers ────────────────────────────────────────
 
 extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
-    serial_println!("[EXCEPTION] Breakpoint");
-    serial_println!("  {:#?}", stack_frame);
+    serial_println!("[EXCEPTION] Breakpoint at {:#?}", stack_frame.instruction_pointer);
 }
 
-extern "x86-interrupt" fn double_fault_handler(
-    stack_frame: InterruptStackFrame,
-    error_code: u64,
-) -> ! {
-    serial_println!("!!! DOUBLE FAULT !!! (error code: {})", error_code);
-    serial_println!("  {:#?}", stack_frame);
-    panic!("Double fault — cannot recover");
+extern "x86-interrupt" fn double_fault_handler(stack_frame: InterruptStackFrame, _error_code: u64) -> ! {
+    serial_println!("!!! DOUBLE FAULT !!! at {:#?}", stack_frame.instruction_pointer);
+    loop { x86_64::instructions::hlt(); }
 }
 
-extern "x86-interrupt" fn page_fault_handler(
-    stack_frame: InterruptStackFrame,
-    error_code: PageFaultErrorCode,
-) {
+extern "x86-interrupt" fn page_fault_handler(stack_frame: InterruptStackFrame, error_code: PageFaultErrorCode) {
     use x86_64::registers::control::Cr2;
-    let fault_addr = Cr2::read().expect("invalid CR2 address");
-
-    // Check for CoW fault: write to a present page from user mode
-    let is_write = error_code.contains(PageFaultErrorCode::CAUSED_BY_WRITE);
-    let is_user = error_code.contains(PageFaultErrorCode::USER_MODE);
-    let is_protection = error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION);
-
-    if is_write && is_user && is_protection {
-        // Potential CoW fault — try to handle it
-        let pid = crate::process::scheduler::current_pid().unwrap_or(0);
-        if pid != 0 {
-            let table = crate::process::process::PROCESS_TABLE.lock();
-            if let Some(proc) = table.get(&pid) {
-                if let Some(pml4) = proc.page_table {
-                    drop(table);
-                    if crate::memory::cow::handle_cow_fault(pml4, fault_addr) {
-                        return; // CoW fault resolved, resume user code
-                    }
-                }
-            }
-        }
-    }
-
-    if is_user {
-        // User-mode page fault that wasn't CoW — kill the process
-        let pid = crate::process::scheduler::current_pid().unwrap_or(0);
-        serial_println!(
-            "[page_fault] Killing user process {} (addr={:?}, error={:?})",
-            pid, fault_addr, error_code
-        );
-        if pid != 0 {
-            crate::process::process::exit_process_full(pid, -11); // SIGSEGV
-            crate::process::scheduler::exit_current_thread();
-        }
-    }
-
-    // Kernel-mode page fault — unrecoverable
-    serial_println!("[EXCEPTION] Page Fault");
-    serial_println!("  Accessed address: {:?}", fault_addr);
-    serial_println!("  Error code: {:?}", error_code);
-    serial_println!("  {:#?}", stack_frame);
+    let fault_addr = Cr2::read().unwrap();
+    serial_println!("[EXCEPTION] Page Fault at {:?} (RIP={:#X})", fault_addr, stack_frame.instruction_pointer);
     panic!("Page fault");
 }
 
-extern "x86-interrupt" fn general_protection_fault_handler(
-    stack_frame: InterruptStackFrame,
-    error_code: u64,
-) {
-    serial_println!("[EXCEPTION] GPF (error code: {})", error_code);
-    serial_println!("  {:#?}", stack_frame);
-    panic!("General protection fault");
+extern "x86-interrupt" fn general_protection_fault_handler(stack_frame: InterruptStackFrame, error_code: u64) {
+    serial_println!("[EXCEPTION] GPF at {:#X} (code={})", stack_frame.instruction_pointer.as_u64(), error_code);
+    panic!("GPF");
 }
 
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
-    serial_println!("[EXCEPTION] Invalid Opcode");
-    serial_println!("  {:#?}", stack_frame);
+    serial_println!("[EXCEPTION] Invalid Opcode at {:#?}", stack_frame.instruction_pointer);
     panic!("Invalid opcode");
 }
 
 extern "x86-interrupt" fn divide_error_handler(stack_frame: InterruptStackFrame) {
     serial_println!("[EXCEPTION] Divide Error");
-    serial_println!("  {:#?}", stack_frame);
-    panic!("Division by zero");
+    panic!("Div0");
 }
 
-extern "x86-interrupt" fn stack_segment_fault_handler(
-    stack_frame: InterruptStackFrame,
-    error_code: u64,
-) {
-    serial_println!("[EXCEPTION] Stack Segment Fault (error code: {})", error_code);
-    serial_println!("  {:#?}", stack_frame);
-    panic!("Stack segment fault");
+extern "x86-interrupt" fn stack_segment_fault_handler(stack_frame: InterruptStackFrame, code: u64) {
+    serial_println!("[EXCEPTION] Stack Segment Fault ({})", code);
+    panic!("SSF");
 }

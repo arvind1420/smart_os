@@ -104,7 +104,7 @@ pub fn check_syscall(pid: u64, syscall_nr: usize) -> bool {
     let mut sandboxes = SANDBOXES.lock();
     let profile = match sandboxes.get_mut(&pid) {
         Some(p) => p,
-        None => return true, // No sandbox = unrestricted
+        None => return false, // Strict default-deny: No sandbox = Denied
     };
 
     // Check explicit denylist

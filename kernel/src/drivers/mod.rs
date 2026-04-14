@@ -15,6 +15,8 @@ pub mod e1000;
 pub mod nvme;
 pub mod drm;
 pub mod igpu;
+pub mod hpet;
+pub mod hda;
 
 /// Generic interface for block storage devices (HDD, SSD, VirtIO).
 pub trait BlockDevice: Send {
@@ -39,12 +41,24 @@ pub mod diskfs;
 #[allow(dead_code)]
 pub mod fat32;
 #[allow(dead_code)]
-pub mod xhci;
-#[allow(dead_code)]
-pub mod usb_hid;
-#[allow(dead_code)]
-pub mod gdb_stub;
 pub mod acpi;
+pub mod xhci;
+pub mod usb_hid;
+pub mod gdb_stub;
+pub mod hotplug;
+pub mod uvc;
+pub mod haptic;
+pub mod uart;
+pub mod lpt;
+pub mod ide;
+pub mod vga_emu;
+pub mod ahci;
+pub mod wifi;
+pub mod bluetooth;
+pub mod ntfs;
+pub mod tpm;
+pub mod vulkan;
+pub mod bci;
 
 /// Initialize core hardware drivers (PIC, timer, keyboard, mouse).
 pub fn init() {
@@ -52,4 +66,18 @@ pub fn init() {
     timer::init();
     keyboard::init();
     mouse::init();
+    hotplug::init();
+    uvc::init();
+    haptic::init();
+    uart::init();
+    lpt::init();
+    ide::init();
+    ahci::init();
+    wifi::init();
+    bluetooth::init();
+    ntfs::init();
+    tpm::init();
+    vulkan::init();
+    bci::init();
+    vga_emu::init();
 }

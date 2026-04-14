@@ -23,6 +23,11 @@ pub struct InferenceResult {
     pub all_scores: Vec<(String, f32)>,
 }
 
+/// Mock inference call for security/auth.
+pub fn run_inference(_data: &[u8]) -> Result<(), &'static str> {
+    Ok(())
+}
+
 /// The AI inference engine.
 pub struct InferenceEngine {
     models: BTreeMap<String, FeedForwardModel>,

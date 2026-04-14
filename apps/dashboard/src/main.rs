@@ -1,11 +1,43 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 use smartsdk::gui::{Window, EVENT_MOUSE_CLICK};
 use smartsdk::sysinfo::get_sysinfo;
 use smartsdk::io::print;
 use smartsdk::format_buf;
 use smartsdk::kmod;
+use core::alloc::{GlobalAlloc, Layout};
+
+// Standard Smart OS User-space Allocator (Bump)
+struct BumpAllocator {
+    heap: core::cell::UnsafeCell<[u8; 2 * 1024 * 1024]>, // 2MB heap
+    next: core::sync::atomic::AtomicUsize,
+}
+
+unsafe impl Sync for BumpAllocator {}
+
+unsafe impl GlobalAlloc for BumpAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let align = layout.align();
+        let size = layout.size();
+        let mut next = self.next.load(core::sync::atomic::Ordering::Relaxed);
+        let padding = next % align;
+        let offset = if padding == 0 { 0 } else { align - padding };
+        next += offset;
+        if next + size > 2 * 1024 * 1024 { return core::ptr::null_mut(); }
+        self.next.store(next + size, core::sync::atomic::Ordering::Relaxed);
+        self.heap.get().cast::<u8>().add(next)
+    }
+    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
+}
+
+#[global_allocator]
+static ALLOCATOR: BumpAllocator = BumpAllocator {
+    heap: core::cell::UnsafeCell::new([0; 2 * 1024 * 1024]),
+    next: core::sync::atomic::AtomicUsize::new(0),
+};
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {

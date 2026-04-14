@@ -15,19 +15,32 @@ const BCS_RING_BUFFER_TAIL: u32 = 0x22030;
 const BCS_RING_BUFFER_START: u32 = 0x22038;
 const BCS_RING_BUFFER_CTL: u32 = 0x2203C;
 
+// VCS (Video) Register Offsets
+const VCS_RING_BUFFER_TAIL: u32 = 0x12030;
+const VCS_RING_BUFFER_START: u32 = 0x12038;
+const VCS_RING_BUFFER_CTL: u32 = 0x1203C;
+
 // BCS Commands
 const XY_COLOR_BLT: u32 = (0x2 << 29) | (0x50 << 22) | (0x4); // 2D, Op 50h, length 6 (0-indexed)
 const XY_SRC_COPY_BLT: u32 = (0x2 << 29) | (0x53 << 22) | (0x6); // length 8
+
+// VCS Commands (Simplified)
+const MFX_WAIT: u32 = (0x3 << 29) | (0x1 << 27) | (0x0 << 23);
 
 pub struct IntelGpu {
     pci_device: pci::PciDevice,
     mmio_base: u64,
     
-    // Ring Buffer
+    // BCS Ring Buffer
     ring_phys: u64,
     ring_virt: *mut u32,
     ring_tail: u32,
     ring_size: u32,
+
+    // VCS Ring Buffer (Video Acceleration)
+    vcs_ring_phys: u64,
+    vcs_ring_virt: *mut u32,
+    vcs_ring_tail: u32,
 }
 
 unsafe impl Send for IntelGpu {}
@@ -41,6 +54,9 @@ impl IntelGpu {
             ring_virt: core::ptr::null_mut(),
             ring_tail: 0,
             ring_size: 16 * 1024, // 16 KB ring
+            vcs_ring_phys: 0,
+            vcs_ring_virt: core::ptr::null_mut(),
+            vcs_ring_tail: 0,
         }
     }
 
@@ -64,6 +80,16 @@ impl IntelGpu {
             self.write_mmio(BCS_RING_BUFFER_TAIL, self.ring_tail);
         }
     }
+
+    /// Submit a video decode command to the VCS engine.
+    pub fn video_decode_begin(&mut self) {
+        // Real implementation would emit MFX_AVC_DECODE commands
+        unsafe {
+            *self.vcs_ring_virt.add((self.vcs_ring_tail / 4) as usize) = MFX_WAIT;
+            self.vcs_ring_tail = (self.vcs_ring_tail + 4) % self.ring_size;
+            self.write_mmio(VCS_RING_BUFFER_TAIL, self.vcs_ring_tail);
+        }
+    }
 }
 
 impl GpuDriver for IntelGpu {
@@ -78,15 +104,25 @@ impl GpuDriver for IntelGpu {
         self.ring_phys = ring_frame.start_address().as_u64();
         self.ring_virt = (phys_offset + self.ring_phys) as *mut u32;
         
+        // Allocate VCS Ring Buffer
+        let vcs_frame = crate::memory::frame::alloc_frame().ok_or("No memory for VCS ring")?;
+        self.vcs_ring_phys = vcs_frame.start_address().as_u64();
+        self.vcs_ring_virt = (phys_offset + self.vcs_ring_phys) as *mut u32;
+
         unsafe {
             core::ptr::write_bytes(self.ring_virt, 0, self.ring_size as usize);
+            core::ptr::write_bytes(self.vcs_ring_virt, 0, self.ring_size as usize);
             
             // Setup BCS Ring
             self.write_mmio(BCS_RING_BUFFER_START, self.ring_phys as u32);
             self.write_mmio(BCS_RING_BUFFER_CTL, (self.ring_size - 4096) | 1); // Enable
+
+            // Setup VCS Ring
+            self.write_mmio(VCS_RING_BUFFER_START, self.vcs_ring_phys as u32);
+            self.write_mmio(VCS_RING_BUFFER_CTL, (self.ring_size - 4096) | 1); // Enable
         }
 
-        crate::serial_println!("[igpu] Intel BCS (Blitter) hardware active.");
+        crate::serial_println!("[igpu] Intel BCS (Blitter) and VCS (Video) hardware active.");
         Ok(())
     }
 

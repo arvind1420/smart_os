@@ -17,3 +17,4 @@ pub mod shmem;
 pub mod swap;
 #[allow(dead_code)]
 pub mod aslr;
+pub mod distributed;

@@ -11,6 +11,11 @@ pub mod tcp;
 pub mod dns;
 pub mod ipv6;
 pub mod http;
+pub mod icmp;
+pub mod p2p;
+pub mod xr;
+pub mod wireguard;
+pub mod iot;
 
 /// Network configuration (QEMU SLIRP defaults).
 pub const LOCAL_IP: [u8; 4] = [10, 0, 2, 15];
@@ -45,6 +50,10 @@ pub fn init() {
     arp::init();
     udp::init();
     tcp::init();
+    p2p::init();
+    xr::init();
+    wireguard::init();
+    iot::init();
 
     // Pre-populate ARP cache with gateway
     // (will be resolved on first send if needed)

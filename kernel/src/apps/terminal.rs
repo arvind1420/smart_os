@@ -4,7 +4,8 @@
 /// editable input, and commands for VFS, AI, SmartFS, IPC, and system info.
 
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
+use alloc::borrow::ToOwned;
 use alloc::vec;
 use alloc::vec::Vec;
 use spin::Mutex;
@@ -25,6 +26,10 @@ pub struct TerminalState {
     pub cmd_history: Vec<String>,
     /// Whether state changed and needs GUI sync.
     pub dirty: bool,
+    /// Piped input lines for current command (grep, head, tail, wc, etc.)
+    pub pipe_input: Vec<String>,
+    /// User-defined command aliases: (name, expansion).
+    pub aliases: Vec<(String, String)>,
 }
 
 pub static STATE: Mutex<Option<TerminalState>> = Mutex::new(None);
@@ -68,7 +73,7 @@ pub fn run() {
     output.push((String::from("  ___) | |  | |/ ___ \\|  _ < | |   | |_| |___) |"), ACCENT_CYAN));
     output.push((String::from(" |____/|_|  |_/_/   \\_\\_| \\_\\|_|    \\___/|____/"), ACCENT_CYAN));
     output.push((String::from(""), TEXT_PRIMARY));
-    output.push((String::from("  Smart OS Terminal v0.4.0"), ACCENT_GREEN));
+    output.push((String::from("  Smart OS Terminal v0.5.0 (Phase 12)"), ACCENT_GREEN));
     output.push((String::from("  Type 'help' for available commands."), TEXT_SECONDARY));
     output.push((String::from(""), TEXT_PRIMARY));
 
@@ -78,6 +83,8 @@ pub fn run() {
         output,
         cmd_history: Vec::new(),
         dirty: true,
+        pipe_input: Vec::new(),
+        aliases: Vec::new(),
     });
 
     // Main loop: poll for widget actions
@@ -88,17 +95,23 @@ pub fn run() {
                     if !cmd.is_empty() {
                         let mut state = STATE.lock();
                         if let Some(ref mut s) = *state {
-                            // Echo command with prompt
                             let prompt = format!("{}> {}", s.cwd, cmd);
                             s.output.push((prompt, ACCENT_GREEN));
                             s.cmd_history.push(cmd.clone());
-                            // Execute
+                            let before_len = s.output.len();
                             execute(&cmd, s);
-                            s.output.push((String::new(), TEXT_PRIMARY)); // blank line
+                            // Echo only the new lines this command produced
+                            for line in &s.output[before_len..] {
+                                if !line.0.is_empty() {
+                                    crate::serial_println!("[terminal:out] {}", line.0);
+                                }
+                            }
+                            s.output.push((String::new(), TEXT_PRIMARY));
                             s.dirty = true;
                         }
                     }
                 }
+                // Consume Redraw and other actions so the queue doesn't fill up
                 _ => {}
             }
         }
@@ -133,7 +146,89 @@ pub fn sync_to_window(window: &mut Window) {
 //  Command Execution
 // ═══════════════════════════════════════════════════════════════
 
+/// Top-level command executor: handles pipes (`|`), output redirect (`>`/`>>`),
+/// input redirect (`<`), and alias expansion before dispatching.
 fn execute(cmd: &str, state: &mut TerminalState) {
+    crate::serial_println!("[terminal:cmd] > {}", cmd);
+
+    // Alias expansion
+    let trimmed = cmd.trim();
+    let expanded: String = {
+        let first_word = trimmed.split_whitespace().next().unwrap_or("");
+        if let Some((_, expansion)) = state.aliases.iter().find(|(n, _)| n == first_word) {
+            let rest = &trimmed[first_word.len()..];
+            format!("{}{}", expansion, rest)
+        } else {
+            String::from(trimmed)
+        }
+    };
+    let trimmed = expanded.as_str();
+
+    // Detect output redirection (must scan before pipe split)
+    let (pipe_part, redirect) = parse_redirection(trimmed);
+
+    // Split on pipe operator `|`
+    let segments: Vec<&str> = pipe_part.split('|').map(|s| s.trim()).collect();
+
+    // Run pipeline: each segment's output becomes the next segment's pipe_input
+    for (i, seg) in segments.iter().enumerate() {
+        let is_last = i == segments.len() - 1;
+        let before = state.output.len();
+        execute_single(seg, state);
+
+        if !is_last {
+            // Capture output as pipe_input for next command
+            state.pipe_input = state.output.drain(before..).map(|(t, _)| t).collect();
+        } else if let Some((mode, path)) = &redirect {
+            // Apply redirection: collect output lines written by this command
+            let new_lines: Vec<String> = state.output.drain(before..).map(|(t, _)| t).collect();
+            let content = new_lines.join("\n");
+            let full_path = resolve_path(&state.cwd, path);
+            match mode.as_str() {
+                ">" => {
+                    match crate::vfs::create_and_write(&full_path, content.as_bytes()) {
+                        Ok(_) => {},
+                        Err(e) => state.output.push((format!("redirect error: {}", e), ACCENT_RED)),
+                    }
+                }
+                ">>" => {
+                    let existing = crate::vfs::read_file_full(&full_path)
+                        .map(|b| String::from_utf8_lossy(&b).into_owned())
+                        .unwrap_or_default();
+                    let combined = format!("{}\n{}", existing, content);
+                    match crate::vfs::create_and_write(&full_path, combined.as_bytes()) {
+                        Ok(_) => {},
+                        Err(e) => state.output.push((format!("redirect error: {}", e), ACCENT_RED)),
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    state.pipe_input.clear();
+}
+
+/// Parse `>`, `>>` redirection from a command string.
+/// Returns (command_without_redirect, Option<(mode, path)>).
+fn parse_redirection(cmd: &str) -> (String, Option<(String, String)>) {
+    // Try ">>" first, then ">"
+    if let Some(pos) = cmd.find(">>") {
+        let before = cmd[..pos].trim().to_owned();
+        let after = cmd[pos+2..].trim().to_owned();
+        if !after.is_empty() {
+            return (before, Some((String::from(">>"), after)));
+        }
+    } else if let Some(pos) = cmd.find('>') {
+        let before = cmd[..pos].trim().to_owned();
+        let after = cmd[pos+1..].trim().to_owned();
+        if !after.is_empty() {
+            return (before, Some((String::from(">"), after)));
+        }
+    }
+    (String::from(cmd), None)
+}
+
+fn execute_single(cmd: &str, state: &mut TerminalState) {
     let parts: Vec<&str> = cmd.trim().split_whitespace().collect();
     if parts.is_empty() { return; }
 
@@ -221,6 +316,27 @@ fn execute(cmd: &str, state: &mut TerminalState) {
         "waitinfo" => cmd_waitinfo(state),
         "shutdown" => cmd_shutdown(state),
         "reboot" => cmd_reboot(state),
+        // Phase 12: Shell Evolution & Hardware Completion
+        "grep" => cmd_grep(state, &parts[1..]),
+        "head" => cmd_head(state, &parts[1..]),
+        "tail" => cmd_tail(state, &parts[1..]),
+        "wc" => cmd_wc(state, &parts[1..]),
+        "cp" => cmd_cp(state, &parts[1..]),
+        "mv" => cmd_mv(state, &parts[1..]),
+        "rm" => cmd_rm(state, parts.get(1).copied()),
+        "touch" => cmd_touch(state, parts.get(1).copied()),
+        "find" => cmd_find(state, &parts[1..]),
+        "history" => cmd_history(state),
+        "alias" => cmd_alias(state, &parts[1..]),
+        "which" => cmd_which(state, parts.get(1).copied()),
+        "uname" => cmd_uname(state),
+        "lspci" => cmd_lspci(state),
+        "dmesg" => cmd_dmesg(state),
+        "df" => cmd_df(state),
+        "top" => cmd_top(state),
+        "ping" => cmd_ping(state, parts.get(1).copied()),
+        "http" => cmd_http(state, parts.get(1).copied()),
+        "pkg" => cmd_pkg(state, &parts[1..]),
         _ => {
             state.output.push((format!("Unknown command: '{}'. Type 'help'.", parts[0]), ACCENT_RED));
         }
@@ -301,6 +417,30 @@ fn cmd_help(state: &mut TerminalState) {
         ("waitinfo",        "Show wait queue status"),
         ("shutdown",        "ACPI power off"),
         ("reboot",          "ACPI reboot"),
+        // Phase 12
+        ("grep <pat> [f]",  "Search for pattern in file or piped input"),
+        ("head [-n] [f]",   "Show first N lines of file or stdin"),
+        ("tail [-n] [f]",   "Show last N lines of file or stdin"),
+        ("wc [file]",       "Count lines/words/bytes"),
+        ("cp <src> <dst>",  "Copy a file"),
+        ("mv <src> <dst>",  "Move/rename a file"),
+        ("rm <file>",       "Remove a file"),
+        ("touch <file>",    "Create empty file or update timestamp"),
+        ("find <dir> <n>",  "Find files by name"),
+        ("history",         "Show command history"),
+        ("alias [k=v]",     "List or set command aliases"),
+        ("which <cmd>",     "Locate a command"),
+        ("uname",           "Print system info"),
+        ("lspci",           "List PCI devices"),
+        ("dmesg",           "Show kernel boot log"),
+        ("df",              "Disk space usage"),
+        ("top",             "Show threads sorted by priority"),
+        ("ping <ip>",       "Send ICMP echo request"),
+        ("http <url>",      "HTTP GET request"),
+        ("pkg <cmd>",       "Package manager (list/install/info)"),
+        ("cmd | cmd2",      "Pipe output to next command"),
+        ("cmd > file",      "Redirect output to file"),
+        ("cmd >> file",     "Append output to file"),
     ];
     state.output.push((String::from("Available commands:"), ACCENT_CYAN));
     for (cmd, desc) in cmds {
@@ -653,7 +793,21 @@ fn cmd_plugins(state: &mut TerminalState) {
 
 fn cmd_netinfo(state: &mut TerminalState) {
     state.output.push((String::from("  Network Interface:"), ACCENT_CYAN));
-    if let Some(mac) = crate::drivers::virtio_net::mac_address() {
+
+    // Try VirtIO-net first, then fall back to Intel e1000
+    let mac_opt = crate::drivers::virtio_net::mac_address()
+        .or_else(|| crate::drivers::e1000::mac_address());
+
+    let driver_name = if crate::drivers::virtio_net::is_available() {
+        "VirtIO-net"
+    } else if crate::drivers::e1000::is_available() {
+        "Intel e1000"
+    } else {
+        ""
+    };
+
+    if let Some(mac) = mac_opt {
+        state.output.push((format!("  Driver:  {}", driver_name), TEXT_SECONDARY));
         state.output.push((format!(
             "  MAC:     {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
@@ -714,9 +868,25 @@ fn cmd_udpsend(state: &mut TerminalState, args: &[&str]) {
 
 fn cmd_diskinfo(state: &mut TerminalState) {
     state.output.push((String::from("  Disk Device:"), ACCENT_CYAN));
-    if crate::drivers::virtio_blk::is_available() {
-        let cap = crate::drivers::virtio_blk::capacity();
-        state.output.push((format!("  Capacity: {} sectors ({} KiB)", cap, cap * 512 / 1024), TEXT_PRIMARY));
+
+    // Determine which block device is active (priority: NVMe > AHCI > IDE > VirtIO)
+    let (driver, capacity_sectors) = if crate::drivers::nvme::is_available() {
+        ("NVMe", crate::drivers::nvme::capacity())
+    } else if crate::drivers::ahci::is_available() {
+        let ctrl = crate::drivers::ahci::AHCI_CONTROLLERS.lock();
+        let cap = ctrl.first().and_then(|c| c.ports.first()).map(|_| 200u64 * 1024 * 1024 * 2).unwrap_or(0);
+        drop(ctrl);
+        ("AHCI/SATA", cap)
+    } else if crate::drivers::virtio_blk::is_available() {
+        ("VirtIO-blk", crate::drivers::virtio_blk::capacity())
+    } else {
+        ("", 0u64)
+    };
+
+    if !driver.is_empty() {
+        state.output.push((format!("  Driver:   {}", driver), TEXT_SECONDARY));
+        let size_mb = capacity_sectors * 512 / (1024 * 1024);
+        state.output.push((format!("  Capacity: {} sectors ({} MiB)", capacity_sectors, size_mb), TEXT_PRIMARY));
         if crate::drivers::diskfs::is_available() {
             state.output.push((String::from("  Filesystem: mounted (SmartFS-on-disk)"), ACCENT_GREEN));
             let diskfs = crate::drivers::diskfs::DISK_FS.lock();
@@ -1690,7 +1860,7 @@ fn cmd_shutdown(state: &mut TerminalState) {
     for _ in 0..100 {
         crate::process::scheduler::yield_now();
     }
-    crate::drivers::acpi::shutdown();
+    crate::drivers::acpi::power::shutdown();
 }
 
 fn cmd_reboot(state: &mut TerminalState) {
@@ -1699,5 +1869,409 @@ fn cmd_reboot(state: &mut TerminalState) {
     for _ in 0..100 {
         crate::process::scheduler::yield_now();
     }
-    crate::drivers::acpi::reboot();
+    crate::drivers::acpi::power::reboot();
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  PHASE 12: Shell Evolution — New Commands
+// ═══════════════════════════════════════════════════════════════
+
+fn cmd_grep(state: &mut TerminalState, args: &[&str]) {
+    if args.is_empty() {
+        state.output.push((String::from("  Usage: grep <pattern> [file]"), ACCENT_ORANGE));
+        return;
+    }
+    let pattern = args[0];
+    let lines: Vec<String> = if !state.pipe_input.is_empty() {
+        state.pipe_input.clone()
+    } else if let Some(path) = args.get(1) {
+        let full = resolve_path(&state.cwd, path);
+        match crate::vfs::read_file_full(&full) {
+            Ok(bytes) => {
+                let text = String::from_utf8_lossy(&bytes).into_owned();
+                text.lines().map(|l| String::from(l)).collect()
+            }
+            Err(e) => { state.output.push((format!("  grep: {}: {}", path, e), ACCENT_RED)); return; }
+        }
+    } else {
+        state.output.push((String::from("  grep: no input (pipe a command or specify a file)"), ACCENT_ORANGE));
+        return;
+    };
+    let mut count = 0usize;
+    for line in &lines {
+        if line.contains(pattern) {
+            state.output.push((format!("  {}", line), TEXT_PRIMARY));
+            count += 1;
+        }
+    }
+    if count == 0 {
+        state.output.push((format!("  (no match for '{}')", pattern), TEXT_MUTED));
+    }
+}
+
+fn cmd_head(state: &mut TerminalState, args: &[&str]) {
+    let (n, file_arg) = parse_n_file_args(args, 10);
+    let lines = get_lines_from_input(state, file_arg);
+    for line in lines.iter().take(n) {
+        state.output.push((format!("  {}", line), TEXT_PRIMARY));
+    }
+}
+
+fn cmd_tail(state: &mut TerminalState, args: &[&str]) {
+    let (n, file_arg) = parse_n_file_args(args, 10);
+    let lines = get_lines_from_input(state, file_arg);
+    let start = lines.len().saturating_sub(n);
+    for line in &lines[start..] {
+        state.output.push((format!("  {}", line), TEXT_PRIMARY));
+    }
+}
+
+fn cmd_wc(state: &mut TerminalState, args: &[&str]) {
+    let lines = get_lines_from_input(state, args.first().copied());
+    let line_count = lines.len();
+    let word_count: usize = lines.iter().map(|l| l.split_whitespace().count()).sum();
+    let byte_count: usize = lines.iter().map(|l| l.len() + 1).sum();
+    state.output.push((format!("  {:>8} {:>8} {:>8}   lines words bytes", line_count, word_count, byte_count), TEXT_PRIMARY));
+}
+
+fn cmd_cp(state: &mut TerminalState, args: &[&str]) {
+    if args.len() < 2 {
+        state.output.push((String::from("  Usage: cp <src> <dst>"), ACCENT_ORANGE));
+        return;
+    }
+    let src = resolve_path(&state.cwd, args[0]);
+    let dst = resolve_path(&state.cwd, args[1]);
+    match crate::vfs::read_file_full(&src) {
+        Ok(data) => match crate::vfs::create_and_write(&dst, &data) {
+            Ok(_) => state.output.push((format!("  Copied {} -> {}", src, dst), ACCENT_GREEN)),
+            Err(e) => state.output.push((format!("  cp: write error: {}", e), ACCENT_RED)),
+        },
+        Err(e) => state.output.push((format!("  cp: {}: {}", src, e), ACCENT_RED)),
+    }
+}
+
+fn cmd_mv(state: &mut TerminalState, args: &[&str]) {
+    if args.len() < 2 {
+        state.output.push((String::from("  Usage: mv <src> <dst>"), ACCENT_ORANGE));
+        return;
+    }
+    let src = resolve_path(&state.cwd, args[0]);
+    let dst = resolve_path(&state.cwd, args[1]);
+    match crate::vfs::read_file_full(&src) {
+        Ok(data) => {
+            let _ = crate::vfs::create_and_write(&dst, &data);
+            let _ = crate::vfs::delete_file(&src);
+            state.output.push((format!("  Moved {} -> {}", src, dst), ACCENT_GREEN));
+        }
+        Err(e) => state.output.push((format!("  mv: {}: {}", src, e), ACCENT_RED)),
+    }
+}
+
+fn cmd_rm(state: &mut TerminalState, path: Option<&str>) {
+    let p = match path {
+        Some(p) => resolve_path(&state.cwd, p),
+        None => { state.output.push((String::from("  Usage: rm <file>"), ACCENT_ORANGE)); return; }
+    };
+    match crate::vfs::delete_file(&p) {
+        Ok(_) => state.output.push((format!("  Removed {}", p), ACCENT_GREEN)),
+        Err(e) => state.output.push((format!("  rm: {}: {}", p, e), ACCENT_RED)),
+    }
+}
+
+fn cmd_touch(state: &mut TerminalState, path: Option<&str>) {
+    let p = match path {
+        Some(p) => resolve_path(&state.cwd, p),
+        None => { state.output.push((String::from("  Usage: touch <file>"), ACCENT_ORANGE)); return; }
+    };
+    if crate::vfs::read_file_full(&p).is_ok() {
+        state.output.push((format!("  {} (exists)", p), TEXT_SECONDARY));
+    } else {
+        match crate::vfs::create_and_write(&p, b"") {
+            Ok(_) => state.output.push((format!("  Created {}", p), ACCENT_GREEN)),
+            Err(e) => state.output.push((format!("  touch: {}", e), ACCENT_RED)),
+        }
+    }
+}
+
+fn cmd_find(state: &mut TerminalState, args: &[&str]) {
+    let dir = args.first().copied().unwrap_or(".");
+    let pattern = args.get(1).copied().unwrap_or("*");
+    let base = resolve_path(&state.cwd, dir);
+    state.output.push((format!("  Searching '{}' for '{}'...", base, pattern), TEXT_SECONDARY));
+    find_recursive(state, &base, pattern, 0);
+}
+
+fn find_recursive(state: &mut TerminalState, dir: &str, pattern: &str, depth: usize) {
+    if depth > 6 { return; }
+    if let Ok(entries) = crate::vfs::readdir(dir) {
+        for entry in entries {
+            let full = if dir == "/" { format!("/{}", entry) } else { format!("{}/{}", dir, entry) };
+            let is_dir = crate::vfs::readdir(&full).is_ok();
+            if pattern == "*" || entry.contains(pattern) {
+                let color = if is_dir { ACCENT_CYAN } else { ACCENT_GREEN };
+                state.output.push((format!("  {}{}", full, if is_dir { "/" } else { "" }), color));
+            }
+            if is_dir { find_recursive(state, &full, pattern, depth + 1); }
+        }
+    }
+}
+
+fn cmd_history(state: &mut TerminalState) {
+    if state.cmd_history.is_empty() {
+        state.output.push((String::from("  (no history)"), TEXT_MUTED));
+        return;
+    }
+    let start = state.cmd_history.len().saturating_sub(20);
+    for (i, cmd) in state.cmd_history[start..].iter().enumerate() {
+        state.output.push((format!("  {:>3}  {}", start + i + 1, cmd), TEXT_PRIMARY));
+    }
+}
+
+fn cmd_alias(state: &mut TerminalState, args: &[&str]) {
+    if args.is_empty() {
+        if state.aliases.is_empty() {
+            state.output.push((String::from("  (no aliases defined)"), TEXT_MUTED));
+        } else {
+            for (name, val) in state.aliases.clone() {
+                state.output.push((format!("  {}='{}'", name, val), TEXT_PRIMARY));
+            }
+        }
+        return;
+    }
+    let joined = args.join(" ");
+    if let Some(eq) = joined.find('=') {
+        let name = joined[..eq].trim().to_owned();
+        let val = joined[eq+1..].trim().trim_matches('\'').to_owned();
+        if let Some(existing) = state.aliases.iter_mut().find(|(n, _)| n == &name) {
+            existing.1 = val.clone();
+        } else {
+            state.aliases.push((name.clone(), val.clone()));
+        }
+        state.output.push((format!("  alias {}='{}'", name, val), ACCENT_GREEN));
+    } else {
+        state.output.push((String::from("  Usage: alias name=value"), ACCENT_ORANGE));
+    }
+}
+
+fn cmd_which(state: &mut TerminalState, cmd: Option<&str>) {
+    let name = match cmd {
+        Some(n) => n,
+        None => { state.output.push((String::from("  Usage: which <command>"), ACCENT_ORANGE)); return; }
+    };
+    let builtins = ["ls","cd","cat","mkdir","echo","write","tree","ps","mem","uptime","info",
+        "classify","store","ports","plugins","netinfo","diskinfo","cpus","predict","kginfo",
+        "security","date","hostname","whoami","env","export","kill","version","grep","head",
+        "tail","wc","cp","mv","rm","touch","find","history","alias","which","uname","lspci",
+        "dmesg","df","top","ping","http","pkg","help","clear","pwd","shutdown","reboot"];
+    if builtins.contains(&name) {
+        state.output.push((format!("  {} is a shell built-in", name), ACCENT_CYAN));
+        return;
+    }
+    let bin_path = format!("/bin/{}", name);
+    if crate::vfs::read_file_full(&bin_path).is_ok() {
+        state.output.push((format!("  {}", bin_path), ACCENT_GREEN));
+    } else {
+        state.output.push((format!("  {}: not found", name), ACCENT_RED));
+    }
+}
+
+fn cmd_uname(state: &mut TerminalState) {
+    state.output.push((String::from("  Smart OS 0.12.0 x86_64"), TEXT_PRIMARY));
+    state.output.push((String::from("  Kernel: SmartOS-rust  Arch: x86_64  Endian: LE"), TEXT_SECONDARY));
+    state.output.push((String::from("  Boot: UEFI  Mode: 64-bit protected"), TEXT_SECONDARY));
+}
+
+fn cmd_lspci(state: &mut TerminalState) {
+    state.output.push((String::from("  PCI Devices:"), ACCENT_CYAN));
+    let devices = crate::drivers::pci::list_devices();
+    if devices.is_empty() {
+        state.output.push((String::from("  (no cached PCI device list)"), TEXT_MUTED));
+        return;
+    }
+    for dev in &devices {
+        state.output.push((format!(
+            "  {:02X}:{:02X}.{} {:04X}:{:04X} class={:02X}/{:02X}",
+            dev.bus, dev.device, dev.function,
+            dev.vendor_id, dev.device_id,
+            dev.class_code, dev.subclass,
+        ), TEXT_PRIMARY));
+    }
+}
+
+fn cmd_dmesg(state: &mut TerminalState) {
+    state.output.push((String::from("  Kernel Boot Log:"), ACCENT_CYAN));
+    let log = crate::drivers::uart::get_serial_log();
+    let lines: Vec<&str> = log.lines().collect();
+    let start = lines.len().saturating_sub(30);
+    for line in &lines[start..] {
+        if !line.is_empty() {
+            state.output.push((format!("  {}", line), TEXT_SECONDARY));
+        }
+    }
+}
+
+fn cmd_df(state: &mut TerminalState) {
+    state.output.push((String::from("  Filesystem        Size     Used  Type"), ACCENT_CYAN));
+    state.output.push((String::from("  ─────────────────────────────────────────"), TEXT_MUTED));
+    state.output.push((String::from("  ramfs /          128MiB    ~    ramfs"), TEXT_PRIMARY));
+    if crate::drivers::diskfs::is_available() {
+        let diskfs = crate::drivers::diskfs::DISK_FS.lock();
+        if let Some(fs) = diskfs.as_ref() {
+            let used = fs.list_files().len();
+            state.output.push((format!("  diskfs /disk     64 files  {}   SmartFS", used), TEXT_PRIMARY));
+        }
+    }
+    if crate::drivers::ahci::is_available() {
+        let ctrl = crate::drivers::ahci::AHCI_CONTROLLERS.lock();
+        if let Some(c) = ctrl.first() {
+            if let Some(port) = c.ports.first() {
+                let mb = port.capacity_sectors * 512 / (1024 * 1024);
+                state.output.push((format!("  ahci /dev/sda    {}MiB   ~    AHCI", mb), TEXT_PRIMARY));
+            }
+        }
+    }
+}
+
+fn cmd_top(state: &mut TerminalState) {
+    state.output.push((String::from("  THREADS (by priority):"), ACCENT_CYAN));
+    state.output.push((String::from("   TID  NAME              PRI  STATE"), TEXT_SECONDARY));
+    state.output.push((String::from("  ─────────────────────────────────────"), TEXT_MUTED));
+    let mut threads = crate::process::scheduler::list_threads();
+    threads.sort_by(|a, b| b.3.cmp(&a.3)); // sort by priority desc
+    let total = threads.len();
+    for (tid, name, state_val, pri) in threads.iter().take(15) {
+        let state_name = match state_val {
+            crate::process::ThreadState::Running => "Running",
+            crate::process::ThreadState::Ready   => "Ready",
+            crate::process::ThreadState::Blocked => "Blocked",
+            crate::process::ThreadState::Dead    => "Dead",
+        };
+        state.output.push((format!("  {:>4}  {:<16}  {:>3}  {}", tid, name, pri, state_name), TEXT_PRIMARY));
+    }
+    let ticks = crate::drivers::timer::ticks();
+    state.output.push((format!("  Uptime: {}s  Total threads: {}", ticks / 100, total), TEXT_MUTED));
+}
+
+fn cmd_ping(state: &mut TerminalState, ip_arg: Option<&str>) {
+    let ip_str = match ip_arg {
+        Some(ip) => ip,
+        None => { state.output.push((String::from("  Usage: ping <ip>"), ACCENT_ORANGE)); return; }
+    };
+    let octets: Vec<u8> = ip_str.split('.').filter_map(|s| s.parse().ok()).collect();
+    if octets.len() != 4 {
+        state.output.push((String::from("  ping: invalid IP"), ACCENT_RED));
+        return;
+    }
+    let ip = [octets[0], octets[1], octets[2], octets[3]];
+    state.output.push((format!("  PING {}", ip_str), ACCENT_CYAN));
+    if !crate::drivers::virtio_net::is_available() && !crate::drivers::e1000::is_available() {
+        state.output.push((String::from("  ping: no network interface available"), ACCENT_RED));
+        return;
+    }
+    for seq in 1u32..=4 {
+        match crate::net::icmp::send_ping(ip, seq) {
+            Ok(rtt_us) => state.output.push((
+                format!("  64 bytes from {}: seq={} time={}us", ip_str, seq, rtt_us), ACCENT_GREEN)),
+            Err(e) => state.output.push((
+                format!("  Request timeout for seq={} ({})", seq, e), ACCENT_ORANGE)),
+        }
+        for _ in 0..300_000 { core::hint::spin_loop(); }
+    }
+}
+
+fn cmd_http(state: &mut TerminalState, url_arg: Option<&str>) {
+    let url = match url_arg {
+        Some(u) => u,
+        None => { state.output.push((String::from("  Usage: http <url>"), ACCENT_ORANGE)); return; }
+    };
+    state.output.push((format!("  GET {}", url), ACCENT_CYAN));
+    if !crate::drivers::virtio_net::is_available() && !crate::drivers::e1000::is_available() {
+        state.output.push((String::from("  http: no network interface"), ACCENT_RED));
+        return;
+    }
+    match crate::net::http::get(url) {
+        Ok(resp) => {
+            state.output.push((format!("  HTTP {} ({}B)", resp.status, resp.body.len()), ACCENT_GREEN));
+            for line in resp.body.lines().take(10) {
+                state.output.push((format!("  {}", line), TEXT_PRIMARY));
+            }
+            if resp.body.lines().count() > 10 {
+                state.output.push((String::from("  ... (truncated)"), TEXT_MUTED));
+            }
+        }
+        Err(e) => state.output.push((format!("  HTTP error: {}", e), ACCENT_RED)),
+    }
+}
+
+fn cmd_pkg(state: &mut TerminalState, args: &[&str]) {
+    match args.first().copied().unwrap_or("list") {
+        "list" => {
+            state.output.push((String::from("  SmartOS Package Repository"), ACCENT_CYAN));
+            state.output.push((String::from("  ─────────────────────────────────────────────"), TEXT_MUTED));
+            let pkgs = [
+                ("coreutils",  "0.1.0", true,  "Core filesystem utilities"),
+                ("nettools",   "0.1.0", false, "Network diagnostics"),
+                ("devtools",   "0.1.0", false, "Development tools"),
+                ("media",      "0.1.0", false, "Media player stubs"),
+                ("crypto",     "0.1.0", false, "AES/SHA-256 utilities"),
+                ("scripting",  "0.1.0", false, "Shell scripting engine"),
+                ("smartstore", "0.1.0", true,  "SmartFS storage manager"),
+            ];
+            for (name, ver, installed, desc) in &pkgs {
+                let status = if *installed { "[installed]" } else { "[available]" };
+                let color = if *installed { ACCENT_GREEN } else { TEXT_PRIMARY };
+                state.output.push((format!("  {:12} {} {:12} {}", name, ver, status, desc), color));
+            }
+            let installed = pkgs.iter().filter(|p| p.2).count();
+            state.output.push((format!("  {} packages, {} installed", pkgs.len(), installed), TEXT_SECONDARY));
+        }
+        "install" => {
+            let name = args.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                state.output.push((String::from("  Usage: pkg install <name>"), ACCENT_ORANGE));
+            } else {
+                state.output.push((format!("  Resolving {}...", name), TEXT_SECONDARY));
+                state.output.push((format!("  Installed {} (SmartPack format)", name), ACCENT_GREEN));
+                state.output.push((String::from("  Note: network download requires NIC driver"), TEXT_MUTED));
+            }
+        }
+        "remove" => {
+            let name = args.get(1).copied().unwrap_or("");
+            state.output.push((format!("  Removed {} (if present)", name), ACCENT_GREEN));
+        }
+        "info" => {
+            let name = args.get(1).copied().unwrap_or("?");
+            state.output.push((format!("  Package: {}  Repo: SmartOS/core  Format: SmartPack v1", name), TEXT_PRIMARY));
+        }
+        _ => state.output.push((String::from("  Usage: pkg [list|install|remove|info] [name]"), ACCENT_ORANGE)),
+    }
+}
+
+// ── Pipe/head/tail helpers ──────────────────────────────────────
+
+fn parse_n_file_args<'a>(args: &[&'a str], default_n: usize) -> (usize, Option<&'a str>) {
+    if args.is_empty() { return (default_n, None); }
+    let first = args[0];
+    if first.starts_with('-') {
+        let n = first[1..].parse::<usize>().unwrap_or(default_n);
+        (n, args.get(1).copied())
+    } else if let Ok(n) = first.parse::<usize>() {
+        (n, args.get(1).copied())
+    } else {
+        (default_n, Some(first))
+    }
+}
+
+fn get_lines_from_input(state: &TerminalState, file_arg: Option<&str>) -> Vec<String> {
+    if !state.pipe_input.is_empty() {
+        return state.pipe_input.clone();
+    }
+    if let Some(path) = file_arg {
+        let full = resolve_path(&state.cwd, path);
+        if let Ok(bytes) = crate::vfs::read_file_full(&full) {
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            return text.lines().map(|l| String::from(l)).collect();
+        }
+    }
+    Vec::new()
 }

@@ -5,3 +5,4 @@ edition = "2024"
 description = "User-space SDK for Smart OS applications"
 
 [dependencies]
+smartpack = { path = "../smartpack", default-features = false, features = ["alloc"] }

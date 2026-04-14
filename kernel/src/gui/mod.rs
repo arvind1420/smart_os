@@ -25,11 +25,17 @@ pub mod virtual_desktop;
 pub mod theming;
 pub mod display_server;
 pub mod ipc;
+pub mod xr;
+pub mod wayland;
+pub mod holographic;
 
 /// Initialize the GUI subsystem.
 pub fn init(fb_addr: *mut u8, width: usize, height: usize, stride: usize, bpp: usize, is_bgr: bool) {
     compositor::init(fb_addr, width, height, stride, bpp, is_bgr);
     desktop::init();
+    xr::init();
+    wayland::init();
+    holographic::init();
     crate::serial_println!("[gui] GUI compositor initialized ({}x{}).", width, height);
 }
 

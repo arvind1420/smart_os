@@ -10,3 +10,6 @@ pub mod syscall_entry;
 pub mod lapic;
 #[allow(dead_code)]
 pub mod smp;
+pub mod percpu;
+pub mod vmx;
+pub mod pstate;

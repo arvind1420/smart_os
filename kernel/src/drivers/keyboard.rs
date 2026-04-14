@@ -86,7 +86,15 @@ pub fn handle_scancode() {
 }
 
 /// Read the next key event from the buffer (non-blocking).
+/// Also polls the PS/2 status register directly so keyboard works even if
+/// IRQ1 isn't delivered (e.g. when LAPIC is active without an I/O APIC).
 pub fn read_key() -> Option<KeyEvent> {
+    // Poll PS/2 output buffer (bit 0 of status port 0x64).
+    // If data is available, read it now so we don't depend on IRQ1 delivery.
+    let status: u8 = unsafe { x86_64::instructions::port::Port::<u8>::new(0x64).read() };
+    if status & 0x01 != 0 {
+        handle_scancode();
+    }
     KEYBOARD.lock().pop()
 }
 

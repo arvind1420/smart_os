@@ -10,9 +10,25 @@ pub const SYS_GETHOSTBYNAME: u64 = 69;
 pub const SYS_SYSINFO: u64 = 70;
 pub const SYS_KMOD_LOAD: u64 = 71;
 
+// Tensor API
+// pub const SYS_TENSOR_CREATE: u64 = 80;
+// pub const SYS_TENSOR_OP: u64 = 81;
+// pub const SYS_TENSOR_DESTROY: u64 = 82;
+
 pub const SYS_FORK: u64 = 5;
 pub const SYS_EXEC: u64 = 6;
 pub const SYS_WAITPID: u64 = 7;
+pub const SYS_SPAWN: u64 = 8;
+
+pub const SYS_IPC_SEND: u64 = 10;
+pub const SYS_IPC_RECV: u64 = 11;
+pub const SYS_IPC_CREATE_PORT: u64 = 12;
+pub const SYS_IPC_LOOKUP_PORT: u64 = 13;
+
+pub const SYS_READ: u64 = 14;
+pub const SYS_OPEN: u64 = 16;
+pub const SYS_CLOSE: u64 = 17;
+pub const SYS_STAT: u64 = 18;
 
 pub const SYS_DISPLAY_CMD: u64 = 55;
 pub const SYS_DISPLAY_EVENT: u64 = 56;

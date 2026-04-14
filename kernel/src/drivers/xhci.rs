@@ -134,6 +134,7 @@ pub struct UsbDevice {
     pub protocol: u8,
     pub is_hid_keyboard: bool,
     pub is_hid_mouse: bool,
+    pub is_mass_storage: bool,
 }
 
 /// Event Ring Segment Table Entry (16 bytes).
@@ -1092,10 +1093,9 @@ impl XhciController {
                 };
 
             // HID class detection
-            // USB HID class = 0x03, subclass 1 = boot interface
-            // protocol 1 = keyboard, protocol 2 = mouse
             let is_hid_keyboard = class == 0x03 && subclass == 0x01 && protocol == 0x01;
             let is_hid_mouse = class == 0x03 && subclass == 0x01 && protocol == 0x02;
+            let is_mass_storage = class == 0x08;
 
             let device = UsbDevice {
                 slot_id,
@@ -1107,15 +1107,17 @@ impl XhciController {
                 protocol,
                 is_hid_keyboard,
                 is_hid_mouse,
+                is_mass_storage,
             };
 
             crate::serial_println!(
-                "[xhci]   Slot {}: vendor={:#06X} product={:#06X} class={:#04X}/{:#04X} proto={:#04X}{}{}",
+                "[xhci]   Slot {}: vendor={:#06X} product={:#06X} class={:#04X}/{:#04X} proto={:#04X}{}{}{}",
                 slot_id,
                 vendor_id, product_id,
                 class, subclass, protocol,
                 if is_hid_keyboard { " [HID Keyboard]" } else { "" },
                 if is_hid_mouse { " [HID Mouse]" } else { "" },
+                if is_mass_storage { " [Mass Storage]" } else { "" },
             );
 
             self.devices.push(device);
@@ -1126,6 +1128,18 @@ impl XhciController {
             self.devices.len(),
         );
     }
+}
+
+/// Read sectors from a USB Mass Storage device using SCSI-over-Bulk.
+pub fn usb_read_sectors(slot_id: u8, lba: u64, buf: &mut [u8]) -> Result<(), &'static str> {
+    // In a real implementation, this would:
+    // 1. Create a Command Block Wrapper (CBW) with SCSI READ(10) command.
+    // 2. Send CBW via OUT endpoint.
+    // 3. Receive data via IN endpoint.
+    // 4. Receive Command Status Wrapper (CSW).
+    
+    // For now, we return an error until the full transport is implemented.
+    Err("USB Mass Storage read not fully implemented in this turn")
 }
 
 // ── Spin-delay helper ──

@@ -403,8 +403,12 @@ impl WindowManager {
         }
     }
 
-    /// Add a window to the manager.
-    pub fn add(&mut self, window: Window) {
+    /// Add a window to the manager. If no window is currently active, this one becomes active.
+    pub fn add(&mut self, mut window: Window) {
+        let has_active = self.windows.iter().any(|w| w.active);
+        if !has_active {
+            window.active = true;
+        }
         self.windows.push(window);
     }
 

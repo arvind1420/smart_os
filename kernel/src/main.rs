@@ -1,4 +1,4 @@
-//! Smart OS Kernel — Phase 11
+//! Smart OS Kernel — Phase 12
 //!
 //! A hybrid microkernel for the Smart OS operating system.
 //! Phase 11 adds: Real userland (fork/exec/waitpid), per-process FDs,
@@ -27,6 +27,7 @@ pub mod net;
 pub mod knowledge;
 pub mod security;
 pub mod immutable;
+pub mod io;
 
 use bootloader_api::{entry_point, BootInfo, BootloaderConfig};
 use bootloader_api::config::Mapping;
@@ -49,7 +50,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // ═══════════════════════════════════════════════════════════════
     serial::init();
     serial_println!("====================================================");
-    serial_println!("  SMART OS v0.11.0 — Hybrid Microkernel");
+    serial_println!("  SMART OS v0.12.0 — Hybrid Microkernel");
     serial_println!("  Phase 11: Userland & Real Programs");
     serial_println!("====================================================");
     serial_println!();
@@ -61,6 +62,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     arch::x86_64::gdt::init();
     serial_println!("[boot] Setting up IDT...");
     arch::x86_64::idt::init();
+    serial_println!("[boot] Setting up P-States...");
+    arch::x86_64::pstate::init();
     serial_println!("[boot] CPU tables ready.");
 
     // ═══════════════════════════════════════════════════════════════
@@ -95,6 +98,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     // Initialize page table management.
     memory::paging::init(physical_memory_offset);
+
+    // Initialize ACPI subsystem early.
+    if let Some(rsdp_addr) = boot_info.rsdp_addr.as_ref().copied() {
+        drivers::acpi::init(rsdp_addr, 0);
+    }
 
     let (heap_used, heap_free) = memory::heap::heap_stats();
     serial_println!(
@@ -239,6 +247,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // ═══════════════════════════════════════════════════════════════
     serial_println!("[boot] Spawning system threads...");
     process::scheduler::spawn("gui-renderer", gui_render_thread, 10);
+    process::scheduler::spawn("vga-sync", drivers::vga_emu::vga_sync_thread, 6);
     process::scheduler::spawn("ipc-logger", ipc_logger_thread, 5);
     process::scheduler::spawn("ai-prefetch", ai::prefetch::prefetch_worker, 4);
     process::scheduler::spawn("ai-anomaly", ai_anomaly_detector, 3);
@@ -331,7 +340,15 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     arch::x86_64::lapic::init();
 
     serial_println!("[boot] Bootstrapping application processors...");
-    arch::x86_64::smp::init_smp(4);
+    let mut cpu_count = 4; // Default/Fallback
+    if let Some(acpi) = drivers::acpi::ACPI.lock().as_ref() {
+        let lapic_ids = acpi.get_lapic_ids();
+        if !lapic_ids.is_empty() {
+            cpu_count = lapic_ids.len() as u8;
+            serial_println!("[boot] ACPI detected {} CPUs.", cpu_count);
+        }
+    }
+    arch::x86_64::smp::init_smp(cpu_count);
 
     // ═══════════════════════════════════════════════════════════════
     //  PHASE 21: Knowledge Graph (Unified Data API)
@@ -383,8 +400,30 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial_println!("[boot] Initializing RTC clock driver...");
     drivers::rtc::init();
 
+    serial_println!("[boot] Initializing HPET high-precision timer...");
+    if let Err(e) = drivers::hpet::init() {
+        serial_println!("[boot] HPET warning: {} (falling back to PIT)", e);
+    }
+
+    serial_println!("[boot] Initializing HDA audio controller...");
+    if let Err(e) = drivers::hda::init() {
+        serial_println!("[boot] HDA warning: {}", e);
+    }
+
+    // Spawn the background worker for async I/O
+    process::scheduler::spawn("async-io-worker", io::ring::async_io_worker, 3);
+
+    // ═══════════════════════════════════════════════════════════════
+    //  PHASE 18: Smart Containers & VT-x
+    // ═══════════════════════════════════════════════════════════════
+    process::container::init();
+    if let Err(e) = arch::x86_64::vmx::init() {
+        serial_println!("[boot] VT-x init skipped: {}", e);
+    }
+
     // ═══════════════════════════════════════════════════════════════
     //  PHASE 28: Environment Variables + Signals
+
     // ═══════════════════════════════════════════════════════════════
     serial_println!("[boot] Initializing environment variables...");
     process::env::init();
@@ -445,8 +484,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // ═══════════════════════════════════════════════════════════════
     //  PHASE 35: ACPI Shutdown / Reboot
     // ═══════════════════════════════════════════════════════════════
-    serial_println!("[boot] Initializing ACPI shutdown/reboot...");
-    drivers::acpi::init();
+    serial_println!("[boot] ACPI power management ready.");
 
     // ═══════════════════════════════════════════════════════════════
     //  PHASE 36: User-Space Programs (/bin)
@@ -475,11 +513,25 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     }
 
     // ═══════════════════════════════════════════════════════════════
+    //  PHASE 37: Phase 12 — Shell Evolution & Hardware Completion
+    // ═══════════════════════════════════════════════════════════════
+    serial_println!("[boot] Phase 12: Shell evolution + AHCI DMA + HTTP client + ICMP + pkg.");
+    // AHCI was already initialized in Phase 11 (drivers::init()), but log completion.
+    if drivers::ahci::is_available() {
+        serial_println!("[boot] Phase 12: AHCI DMA driver active.");
+    }
+    // Update /system/version to v0.12.0
+    let _ = vfs::create_and_write("/system/version", b"Smart OS v0.12.0");
+    serial_println!("[boot] Phase 12 initialized (pipes, grep, head, tail, wc, cp, mv, rm,");
+    serial_println!("[boot]   touch, find, history, alias, which, uname, lspci, dmesg,");
+    serial_println!("[boot]   df, top, ping, http, pkg, AHCI DMA, HTTP client, ICMP, sysmon graphs).");
+
+    // ═══════════════════════════════════════════════════════════════
     //  BOOT COMPLETE — enable interrupts and enter main loop
     // ═══════════════════════════════════════════════════════════════
     serial_println!();
     serial_println!("======================================================");
-    serial_println!("  SMART OS v0.11.0 — ALL SYSTEMS ONLINE");
+    serial_println!("  SMART OS v0.12.0 — PHASE 12 ONLINE");
     serial_println!("  Subsystems: drivers, process, ipc, vfs, gui, ai,");
     serial_println!("    smartfs, plugins, apps, net, knowledge, security,");
     serial_println!("    immutable, usb, fat32, clipboard, notifications,");
@@ -490,6 +542,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial_println!("  Phase 11: fork/exec/waitpid, per-process FDs,");
     serial_println!("    wait queues, CoW page faults, ACPI shutdown,");
     serial_println!("    user programs: true/false/echo/cat/ls/sh/forktest");
+    serial_println!("  Phase 12: AHCI DMA, ICMP ping, HTTP client,");
+    serial_println!("    shell pipes/redirect, grep/head/tail/wc/cp/mv/rm,");
+    serial_println!("    find/touch/history/alias/which/lspci/dmesg/df/top,");
+    serial_println!("    pkg manager, sysmon graphs, e1000+AHCI detection");
     serial_println!("  Apps: terminal, file-manager, sysmon, editor,");
     serial_println!("    calculator, task-manager, settings");
     serial_println!("  AI: file-classifier, app-predictor, anomaly-detector");
@@ -534,8 +590,18 @@ fn main_loop() -> ! {
 /// GUI renderer thread — periodically re-renders the desktop.
 fn gui_render_thread() {
     serial_println!("[thread:gui-renderer] Started.");
+    let mut last_acpi_sync = 0;
     loop {
         gui::render_frame();
+
+        // Periodically sync status (every ~5 seconds)
+        let ticks = drivers::timer::ticks();
+        if ticks - last_acpi_sync > 500 {
+            drivers::acpi::monitor::update();
+            drivers::acpi::monitor::sync_to_vfs();
+            drivers::acpi::uefi_vars::sync_to_vfs();
+            last_acpi_sync = ticks;
+        }
 
         // Yield after each frame
         for _ in 0..50 {
@@ -552,7 +618,7 @@ fn ipc_logger_thread() {
     if let Some(channel) = ipc::port::lookup("system.log") {
         use smartpack::Value;
         use alloc::string::String;
-        let msg = Value::String(String::from("Smart OS v0.11.0 boot complete"));
+        let msg = Value::String(String::from("Smart OS v0.12.0 boot complete"));
         if channel.send(0, msg).is_ok() {
             serial_println!("[ipc-logger] Boot message sent to system.log.");
         }

@@ -252,6 +252,11 @@ pub fn bar0_io_base(dev: &PciDevice) -> Option<u16> {
 }
 
 /// Initialize: scan PCI bus and log discovered devices.
+/// Return all PCI devices (re-scans bus each call for fresh results).
+pub fn list_devices() -> alloc::vec::Vec<PciDevice> {
+    scan_bus()
+}
+
 pub fn init() {
     let devices = scan_bus();
     crate::serial_println!("[pci] Found {} device(s):", devices.len());

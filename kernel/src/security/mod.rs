@@ -6,10 +6,18 @@
 
 pub mod monitor;
 pub mod sandbox;
+pub mod auth;
+pub mod pqc;
+pub mod session;
+pub mod registry;
 
 /// Initialize the security anomaly detection system.
 pub fn init() {
     monitor::init();
     sandbox::init();
-    crate::serial_println!("[security] Kernel-level anomaly detection + sandbox initialized.");
+    auth::init();
+    pqc::init();
+    session::init();
+    registry::init();
+    crate::serial_println!("[security] Kernel-level anomaly detection + sandbox + auth + pqc + sessions + registry initialized.");
 }
