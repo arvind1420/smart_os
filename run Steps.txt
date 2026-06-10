@@ -1,0 +1,19 @@
+
+"C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" convertfromraw "C:\Users\arvin\Desktop\Github\Smart OS\target\smartos.img" "C:\Users\arvin\Desktop\Github\Smart OS\target\smartos.vdi" --format VDI
+
+ On Windows
+   1. Download Rufus (rufus.ie (https://rufus.ie)).
+   2. Select your USB drive.
+   3. Select smartos.img as the Boot Selection.
+   4. Click Start.
+   5. Reboot your PC, enter the Boot Menu (usually F12, F11, or Esc), and select the USB drive. (Ensure Secure Boot is
+      Disabled in BIOS).
+
+
+  On macOS
+   1. Download balenaEtcher (balena.io/etcher (https://www.balena.io/etcher/)).
+   2. Select smartos.img.
+   3. Select your USB drive and click Flash.
+   4. To boot (Intel Macs only): Restart and hold the Option (⌥) key, then select the EFI Boot icon.
+       * Note: It will not boot natively on Apple Silicon (M-series) Macs as they use a different CPU architecture
+         (ARM64).
