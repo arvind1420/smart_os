@@ -40,6 +40,10 @@ pub struct Process {
     pub children: Vec<Pid>,
     /// Whether this process follows the Linux ABI.
     pub is_linux: bool,
+    /// User ID (0 = root).
+    pub uid: u32,
+    /// Group ID.
+    pub gid: u32,
 }
 
 /// Global process table.
@@ -56,7 +60,7 @@ impl Process {
     /// Create a new kernel process (no separate address space).
     pub fn new_kernel(name: &str) -> Self {
         Self {
-            pid: 0, // Kernel is always PID 0
+            pid: 0,
             name: String::from(name),
             page_table: None,
             threads: Vec::new(),
@@ -65,6 +69,8 @@ impl Process {
             exit_code: None,
             children: Vec::new(),
             is_linux: false,
+            uid: 0,
+            gid: 0,
         }
     }
 
@@ -75,6 +81,15 @@ impl Process {
         super::fd::create_fd_table(pid);
         super::posix::init_cwd(pid);
         super::sigdeliver::init_handlers(pid);
+        // Inherit UID/GID from current session
+        let uid = crate::session::current_uid().unwrap_or(1000);
+        let gid = uid;
+        // Assign Linux capabilities based on uid
+        crate::security::linux_caps::assign(
+            pid,
+            if uid == 0 { crate::security::linux_caps::CapSet::all() }
+            else { crate::security::linux_caps::CapSet::non_root_default() },
+        );
         Self {
             pid,
             name: String::from(name),
@@ -85,6 +100,8 @@ impl Process {
             exit_code: None,
             children: Vec::new(),
             is_linux,
+            uid,
+            gid,
         }
     }
 }

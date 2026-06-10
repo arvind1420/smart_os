@@ -56,11 +56,11 @@ pub extern "C" fn _start() -> ! {
     // 2. Main Icon Area (HBox for now, simulating a grid)
     let mut icon_area = HBox::new();
     icon_area.spacing = 40;
-    icon_area.add(Icon::new("Office", "/bin/office"));
-    icon_area.add(Icon::new("Sheets", "/bin/spreadsheet"));
-    icon_area.add(Icon::new("Deck", "/bin/presentation"));
-    icon_area.add(Icon::new("CRM", "/bin/crm"));
     icon_area.add(Icon::new("Web", "/bin/browser"));
+    icon_area.add(Icon::new("Files", "/bin/file_manager"));
+    icon_area.add(Icon::new("Term", "/bin/terminal"));
+    icon_area.add(Icon::new("Store", "/bin/pkg_installer"));
+    icon_area.add(Icon::new("AI", "/bin/ai_assistant"));
     icon_area.add(Icon::new("Games", "/bin/games"));
     desktop_root.add(icon_area);
 

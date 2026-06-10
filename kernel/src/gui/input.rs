@@ -15,25 +15,62 @@ use super::theme::{TITLEBAR_HEIGHT, BORDER_WIDTH, TASKBAR_HEIGHT};
 use super::widget::WidgetAction;
 use crate::drivers::mouse::MouseEvent;
 
+// ── Modifier key state ────────────────────────────────────────────────────────
+
+// PS/2 scancodes for modifier keys (Set 1, press codes)
+const SC_LCTRL:  u8 = 0x1D;
+const SC_LALT:   u8 = 0x38;
+const SC_LSHIFT: u8 = 0x2A;
+const SC_RSHIFT: u8 = 0x36;
+
+struct Modifiers { ctrl: bool, alt: bool, shift: bool }
+static MODS: Mutex<Modifiers> = Mutex::new(Modifiers { ctrl: false, alt: false, shift: false });
+
+fn update_mods(scancode: u8, pressed: bool) {
+    let mut m = MODS.lock();
+    // Release scancodes are press | 0x80
+    let base = scancode & 0x7F;
+    match base {
+        SC_LCTRL  => m.ctrl  = pressed,
+        SC_LALT   => m.alt   = pressed,
+        SC_LSHIFT | SC_RSHIFT => m.shift = pressed,
+        _ => {}
+    }
+}
+
+pub fn ctrl_held()  -> bool { MODS.lock().ctrl  }
+pub fn alt_held()   -> bool { MODS.lock().alt   }
+pub fn shift_held() -> bool { MODS.lock().shift }
+
 /// Hit test result — which part of a window was clicked.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HitRegion {
     TitleBar,
     CloseButton,
     MinimizeButton,
     MaximizeButton,
     Content,
+    ResizeLeft,
     ResizeRight,
+    ResizeTop,
     ResizeBottom,
-    ResizeCorner,
+    ResizeTopLeft,
+    ResizeTopRight,
+    ResizeBottomLeft,
+    ResizeBottomRight,
 }
 
 /// The edge being resized.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResizeEdge {
+    Left,
     Right,
+    Top,
     Bottom,
-    Corner,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
 }
 
 /// GUI input state machine.
@@ -68,6 +105,8 @@ pub struct ResizeState {
     pub window_id: WindowId,
     pub edge: ResizeEdge,
     /// Original window bounds at drag start.
+    pub orig_x: usize,
+    pub orig_y: usize,
     pub orig_w: usize,
     pub orig_h: usize,
     /// Mouse position at drag start.
@@ -123,7 +162,29 @@ pub fn poll_action(window_id: WindowId) -> Option<WidgetAction> {
 
 /// Process a keyboard event, routing it to the focused window's widget tree.
 pub fn handle_key_event(event: crate::drivers::keyboard::KeyEvent) {
+    // Always update modifier state (press and release)
+    update_mods(event.scancode, event.pressed);
+
     if !event.pressed { return; }
+
+    // Intercept keyboard input for CJK IME stub
+    let key = match event.ascii {
+        Some(ascii) => ascii as char,
+        None => '\0',
+    };
+    if super::ime::handle_key(key, event.scancode) {
+        return;
+    }
+
+    // Ctrl+Alt+L — lock screen
+    if ctrl_held() && alt_held() {
+        if event.ascii == Some(b'l') || event.ascii == Some(b'L') || event.scancode == 0x26 {
+            if crate::session::is_logged_in() && !crate::apps::lockscreen::is_showing() {
+                crate::process::scheduler::spawn("lockscreen", crate::apps::lockscreen::show, 16);
+            }
+            return;
+        }
+    }
 
     let mut desktop = DESKTOP.lock();
     let desk = match desktop.as_mut() {
@@ -131,9 +192,91 @@ pub fn handle_key_event(event: crate::drivers::keyboard::KeyEvent) {
         None => { crate::serial_println!("[kbd] no desktop"); return; }
     };
 
+    // Keyboard window management: Alt+Arrows or Ctrl+Alt+Arrows
+    if alt_held() {
+        if let Some(active_id) = desk.wm.active_id() {
+            let screen_dims = {
+                let comp = super::compositor::COMPOSITOR.lock();
+                comp.as_ref().map(|c| (c.width, c.height))
+            };
+            if let Some((sw, sh)) = screen_dims {
+                let snap_h = sh.saturating_sub(TASKBAR_HEIGHT);
+                let mut action_taken = false;
+                let mut toggle_minimize = false;
+
+                if let Some(win) = desk.wm.get_mut(active_id) {
+                    match event.scancode {
+                        0x4B => { // Left Arrow: Snap Left
+                            win.snap_to(0, 0, sw / 2, snap_h);
+                            action_taken = true;
+                        }
+                        0x4D => { // Right Arrow: Snap Right
+                            win.snap_to(sw / 2, 0, sw / 2, snap_h);
+                            action_taken = true;
+                        }
+                        0x48 => { // Up Arrow: Maximize
+                            win.maximize(sw, sh);
+                            action_taken = true;
+                        }
+                        0x50 => { // Down Arrow: Restore or Minimize
+                            if win.state == super::window::WindowState::Maximized || win.pre_snap_bounds.is_some() {
+                                win.restore();
+                            } else {
+                                win.state = super::window::WindowState::Minimized;
+                                win.active = false;
+                                toggle_minimize = true;
+                            }
+                            action_taken = true;
+                        }
+                        _ => {}
+                    }
+                }
+
+                if action_taken {
+                    if toggle_minimize {
+                        desk.wm.auto_focus_next();
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
+    // Alt+Tab — cycle through visible windows
+    if alt_held() && event.scancode == 0x0F {
+        let visible_ids: alloc::vec::Vec<super::window::WindowId> = desk.wm.windows.iter()
+            .filter(|w| w.visible)
+            .map(|w| w.id)
+            .collect();
+        if !visible_ids.is_empty() {
+            let next_id = if let Some(active) = desk.wm.active_id() {
+                if let Some(pos) = visible_ids.iter().position(|&id| id == active) {
+                    visible_ids[(pos + 1) % visible_ids.len()]
+                } else {
+                    visible_ids[0]
+                }
+            } else {
+                visible_ids[0]
+            };
+            desk.wm.bring_to_front(next_id);
+            crate::serial_println!("[kbd] Alt+Tab → window {}", next_id);
+        }
+        return;
+    }
+
     let active_id = match desk.wm.active_id() {
         Some(id) => id,
-        None => { crate::serial_println!("[kbd] no active window"); return; }
+        None => {
+            // No active window — activate the first visible one
+            let first_id = desk.wm.windows.iter()
+                .filter(|w| w.visible)
+                .next()
+                .map(|w| w.id);
+            match first_id {
+                Some(id) => { desk.wm.set_active(id); id }
+                None => { crate::serial_println!("[kbd] no active window"); return; }
+            }
+        }
     };
     crate::serial_println!("[kbd] routing to window {}", active_id);
 
@@ -151,10 +294,13 @@ pub fn handle_key_event(event: crate::drivers::keyboard::KeyEvent) {
     }
 
     // Route other keys to the focused widget
-    let ascii = event.ascii.unwrap_or(0);
+    let key = match event.ascii {
+        Some(ascii) => ascii as char,
+        None => '\0',
+    };
     let scancode = event.scancode;
 
-    if let Some(action) = window.dispatch_key(ascii, scancode) {
+    if let Some(action) = window.dispatch_key(key, scancode) {
         queue_action(active_id, action);
     }
 }
@@ -194,25 +340,66 @@ pub fn handle_mouse_event(event: MouseEvent) {
             let win_id = resize.window_id;
             let dx = mx - resize.start_mx;
             let dy = my - resize.start_my;
-            let new_w = match resize.edge {
-                ResizeEdge::Right | ResizeEdge::Corner => {
-                    (resize.orig_w as i32 + dx).max(MIN_WIDTH as i32) as usize
+
+            let mut new_x = resize.orig_x;
+            let mut new_y = resize.orig_y;
+            let mut new_w = resize.orig_w;
+            let mut new_h = resize.orig_h;
+
+            match resize.edge {
+                ResizeEdge::Right => {
+                    new_w = (resize.orig_w as i32 + dx).max(MIN_WIDTH as i32) as usize;
                 }
-                ResizeEdge::Bottom => resize.orig_w,
-            };
-            let new_h = match resize.edge {
-                ResizeEdge::Bottom | ResizeEdge::Corner => {
-                    (resize.orig_h as i32 + dy).max(MIN_HEIGHT as i32) as usize
+                ResizeEdge::Bottom => {
+                    new_h = (resize.orig_h as i32 + dy).max(MIN_HEIGHT as i32) as usize;
                 }
-                ResizeEdge::Right => resize.orig_h,
-            };
+                ResizeEdge::BottomRight => {
+                    new_w = (resize.orig_w as i32 + dx).max(MIN_WIDTH as i32) as usize;
+                    new_h = (resize.orig_h as i32 + dy).max(MIN_HEIGHT as i32) as usize;
+                }
+                ResizeEdge::Left => {
+                    let right_fixed = resize.orig_x + resize.orig_w;
+                    new_x = (resize.orig_x as i32 + dx).min((right_fixed - MIN_WIDTH) as i32).max(0) as usize;
+                    new_w = right_fixed - new_x;
+                }
+                ResizeEdge::Top => {
+                    let bottom_fixed = resize.orig_y + resize.orig_h;
+                    new_y = (resize.orig_y as i32 + dy).min((bottom_fixed - MIN_HEIGHT) as i32).max(0) as usize;
+                    new_h = bottom_fixed - new_y;
+                }
+                ResizeEdge::TopLeft => {
+                    let right_fixed = resize.orig_x + resize.orig_w;
+                    new_x = (resize.orig_x as i32 + dx).min((right_fixed - MIN_WIDTH) as i32).max(0) as usize;
+                    new_w = right_fixed - new_x;
+
+                    let bottom_fixed = resize.orig_y + resize.orig_h;
+                    new_y = (resize.orig_y as i32 + dy).min((bottom_fixed - MIN_HEIGHT) as i32).max(0) as usize;
+                    new_h = bottom_fixed - new_y;
+                }
+                ResizeEdge::TopRight => {
+                    new_w = (resize.orig_w as i32 + dx).max(MIN_WIDTH as i32) as usize;
+
+                    let bottom_fixed = resize.orig_y + resize.orig_h;
+                    new_y = (resize.orig_y as i32 + dy).min((bottom_fixed - MIN_HEIGHT) as i32).max(0) as usize;
+                    new_h = bottom_fixed - new_y;
+                }
+                ResizeEdge::BottomLeft => {
+                    let right_fixed = resize.orig_x + resize.orig_w;
+                    new_x = (resize.orig_x as i32 + dx).min((right_fixed - MIN_WIDTH) as i32).max(0) as usize;
+                    new_w = right_fixed - new_x;
+
+                    new_h = (resize.orig_h as i32 + dy).max(MIN_HEIGHT as i32) as usize;
+                }
+            }
+
             drop(input);
 
             let mut desktop = DESKTOP.lock();
             if let Some(ref mut desk) = *desktop {
                 if let Some(win) = desk.wm.get_mut(win_id) {
-                    win.width = new_w;
-                    win.height = new_h;
+                    win.x = new_x;
+                    win.y = new_y;
+                    win.resize(new_w, new_h);
                 }
             }
             return;
@@ -221,18 +408,44 @@ pub fn handle_mouse_event(event: MouseEvent) {
 
     // ── Handle drag in progress ──
     if left_pressed {
-        if let Some(ref drag) = input.dragging {
+        if let Some(ref mut drag) = input.dragging {
             let win_id = drag.window_id;
-            let new_x = (mx - drag.offset_x).max(0) as usize;
-            let new_y = (my - drag.offset_y).max(0) as usize;
+            let mut offset_x = drag.offset_x;
+            let mut offset_y = drag.offset_y;
+
+            let mut restore_needed = false;
+            let mut old_w = 1;
+            {
+                let mut desktop_guard = DESKTOP.lock();
+                if let Some(ref mut desk) = *desktop_guard {
+                    if let Some(win) = desk.wm.get_mut(win_id) {
+                        if win.state == super::window::WindowState::Maximized || win.pre_snap_bounds.is_some() {
+                            restore_needed = true;
+                            old_w = win.total_width();
+                            win.restore();
+                        }
+                    }
+                }
+            }
+
+            if restore_needed {
+                let mut desktop_guard = DESKTOP.lock();
+                let new_w = if let Some(ref mut desk) = *desktop_guard {
+                    desk.wm.get_mut(win_id).map(|w| w.total_width()).unwrap_or(1)
+                } else {
+                    1
+                };
+                drag.offset_x = (drag.offset_x as usize * new_w / old_w.max(1)) as i32;
+                offset_x = drag.offset_x;
+            }
+
+            let new_x = (mx - offset_x).max(0) as usize;
+            let new_y = (my - offset_y).max(0) as usize;
             drop(input);
 
             let mut desktop_guard = DESKTOP.lock();
             if let Some(ref mut desk) = *desktop_guard {
                 if let Some(win) = desk.wm.get_mut(win_id) {
-                    if win.pre_snap_bounds.is_some() {
-                        win.restore();
-                    }
                     win.x = new_x;
                     win.y = new_y;
 
@@ -316,6 +529,7 @@ pub fn handle_mouse_event(event: MouseEvent) {
                     let mut desktop = DESKTOP.lock();
                     if let Some(ref mut desk) = *desktop {
                         desk.wm.hide(win_id);
+                        desk.wm.auto_focus_next();
                     }
                     return;
                 }
@@ -328,6 +542,7 @@ pub fn handle_mouse_event(event: MouseEvent) {
                             win.state = super::window::WindowState::Minimized;
                             win.active = false;
                         }
+                        desk.wm.auto_focus_next();
                     }
                     return;
                 }
@@ -400,27 +615,36 @@ pub fn handle_mouse_event(event: MouseEvent) {
                     }
                     return;
                 }
-                HitRegion::ResizeRight | HitRegion::ResizeBottom | HitRegion::ResizeCorner => {
+                HitRegion::ResizeLeft | HitRegion::ResizeRight | HitRegion::ResizeTop | HitRegion::ResizeBottom |
+                HitRegion::ResizeTopLeft | HitRegion::ResizeTopRight | HitRegion::ResizeBottomLeft | HitRegion::ResizeBottomRight => {
                     // Start resize operation
-                    let (orig_w, orig_h) = {
+                    let (orig_x, orig_y, orig_w, orig_h) = {
                         let desktop = DESKTOP.lock();
                         if let Some(ref desk) = *desktop {
                             desk.wm.windows.iter()
                                 .find(|w| w.id == win_id)
-                                .map(|w| (w.width, w.height))
-                                .unwrap_or((300, 200))
+                                .map(|w| (w.x, w.y, w.width, w.height))
+                                .unwrap_or((0, 0, 300, 200))
                         } else {
-                            (300, 200)
+                            (0, 0, 300, 200)
                         }
                     };
                     let edge = match region {
+                        HitRegion::ResizeLeft => ResizeEdge::Left,
                         HitRegion::ResizeRight => ResizeEdge::Right,
+                        HitRegion::ResizeTop => ResizeEdge::Top,
                         HitRegion::ResizeBottom => ResizeEdge::Bottom,
-                        _ => ResizeEdge::Corner,
+                        HitRegion::ResizeTopLeft => ResizeEdge::TopLeft,
+                        HitRegion::ResizeTopRight => ResizeEdge::TopRight,
+                        HitRegion::ResizeBottomLeft => ResizeEdge::BottomLeft,
+                        HitRegion::ResizeBottomRight => ResizeEdge::BottomRight,
+                        _ => unreachable!(),
                     };
                     input.resizing = Some(ResizeState {
                         window_id: win_id,
                         edge,
+                        orig_x,
+                        orig_y,
                         orig_w,
                         orig_h,
                         start_mx: mx,
@@ -623,7 +847,7 @@ fn dispatch_menu_action(action: super::context_menu::MenuAction) {
                 if let Some(id) = desk.wm.active_id() {
                     if let Some(win) = desk.wm.get_mut(id) {
                         // Dispatch a Ctrl+V key event (ascii 0x16)
-                        if let Some(action) = win.dispatch_key(0x16, 0) {
+                        if let Some(action) = win.dispatch_key('\x16', 0) {
                             queue_action(id, action);
                         }
                     }
@@ -639,10 +863,8 @@ fn dispatch_menu_action(action: super::context_menu::MenuAction) {
 // ═══════════════════════════════════════════════════════════════
 
 fn handle_taskbar_click(mx: i32, _my: i32, screen_w: usize, _screen_h: usize) {
-    // Compute taskbar button bounds
-    // Layout: "SMART OS" (68px) | separator (8px) | buttons...
-    let btn_start_x = 76; // after logo + separator
-    let _ = screen_w;
+    let apps_area_start = 226;
+    let apps_area_end = screen_w.saturating_sub(200);
 
     let mut desktop = DESKTOP.lock();
     let desk = match desktop.as_mut() {
@@ -650,32 +872,42 @@ fn handle_taskbar_click(mx: i32, _my: i32, screen_w: usize, _screen_h: usize) {
         None => return,
     };
 
-    // Walk through visible windows to find which button was clicked
-    let mut btn_x = btn_start_x;
+    let mut btn_x = apps_area_start;
     let mut target_id: Option<WindowId> = None;
 
-    // Iterate windows by their actual order (same as window_list used for rendering)
-    for win in desk.wm.windows.iter() {
-        if !win.visible && win.state != super::window::WindowState::Minimized {
-            continue; // Skip hidden windows that aren't minimized
-        }
-        let btn_w = win.title.len() * 8 + 16;
-        if mx >= btn_x && mx < btn_x + btn_w as i32 {
-            target_id = Some(win.id);
+    // Use window_list to get identical list and order
+    let window_list = desk.wm.window_list();
+
+    for &(win_id, title, _, _) in &window_list {
+        let btn_w = (title.len() * 7 + 20).min(120);
+        if btn_x + btn_w > apps_area_end {
             break;
         }
-        btn_x += btn_w as i32 + 4;
+        if mx >= btn_x as i32 && mx < (btn_x + btn_w) as i32 {
+            target_id = Some(win_id);
+            break;
+        }
+        btn_x += btn_w + 4;
     }
 
     if let Some(id) = target_id {
-        // Check if the window is minimized — restore it
+        let mut toggle_minimize = false;
         if let Some(win) = desk.wm.get_mut(id) {
-            if win.state == super::window::WindowState::Minimized {
+            // If it is active and not minimized, minimize it!
+            if win.active && win.state != super::window::WindowState::Minimized {
+                win.state = super::window::WindowState::Minimized;
+                win.active = false;
+                toggle_minimize = true;
+            } else {
                 win.state = super::window::WindowState::Normal;
                 win.visible = true;
             }
         }
-        desk.wm.bring_to_front(id);
+        if toggle_minimize {
+            desk.wm.auto_focus_next();
+        } else {
+            desk.wm.bring_to_front(id);
+        }
     }
 }
 
@@ -710,34 +942,52 @@ fn hit_test_windows(
         let rel_x = mx - wx;
         let rel_y = my - wy;
 
-        // Check resize edges first (bottom-right corner, right edge, bottom edge)
-        if rel_x >= tw - RESIZE_MARGIN && rel_y >= th - RESIZE_MARGIN {
-            return Some((window.id, HitRegion::ResizeCorner));
-        }
-        if rel_x >= tw - RESIZE_MARGIN && rel_y > (TITLEBAR_HEIGHT + BORDER_WIDTH) as i32 {
-            return Some((window.id, HitRegion::ResizeRight));
-        }
-        if rel_y >= th - RESIZE_MARGIN && rel_x > RESIZE_MARGIN {
-            return Some((window.id, HitRegion::ResizeBottom));
+        // Check resize edges first, but ONLY if NOT maximized!
+        if window.state != WindowState::Maximized {
+            // Check corners first (top-left, top-right, bottom-left, bottom-right)
+            if rel_x < RESIZE_MARGIN && rel_y < RESIZE_MARGIN {
+                return Some((window.id, HitRegion::ResizeTopLeft));
+            }
+            if rel_x >= tw - RESIZE_MARGIN && rel_y < RESIZE_MARGIN {
+                return Some((window.id, HitRegion::ResizeTopRight));
+            }
+            if rel_x < RESIZE_MARGIN && rel_y >= th - RESIZE_MARGIN {
+                return Some((window.id, HitRegion::ResizeBottomLeft));
+            }
+            if rel_x >= tw - RESIZE_MARGIN && rel_y >= th - RESIZE_MARGIN {
+                return Some((window.id, HitRegion::ResizeBottomRight));
+            }
+
+            // Check edges (left, right, top, bottom)
+            if rel_x < RESIZE_MARGIN {
+                return Some((window.id, HitRegion::ResizeLeft));
+            }
+            if rel_x >= tw - RESIZE_MARGIN {
+                return Some((window.id, HitRegion::ResizeRight));
+            }
+            if rel_y < RESIZE_MARGIN {
+                return Some((window.id, HitRegion::ResizeTop));
+            }
+            if rel_y >= th - RESIZE_MARGIN {
+                return Some((window.id, HitRegion::ResizeBottom));
+            }
         }
 
         // Title bar region (first TITLEBAR_HEIGHT + BORDER_WIDTH pixels)
-        let tb_height = (TITLEBAR_HEIGHT + 1) as i32;
+        let tb_height = (TITLEBAR_HEIGHT + BORDER_WIDTH) as i32;
         if rel_y < tb_height {
-            // Check close button (last 16px of title bar)
-            let close_x = tw - 16;
-            if rel_x >= close_x {
+            // Check close button (rightmost, 40px wide)
+            let right_limit = tw - BORDER_WIDTH as i32;
+            if rel_x >= right_limit - 40 && rel_x < right_limit {
                 return Some((window.id, HitRegion::CloseButton));
             }
-            // Check minimize button
-            let min_x = close_x - 14;
-            if rel_x >= min_x && rel_x < close_x {
-                return Some((window.id, HitRegion::MinimizeButton));
-            }
-            // Check maximize button
-            let max_x = min_x - 14;
-            if rel_x >= max_x && rel_x < min_x {
+            // Check maximize button (middle, 40px wide)
+            if rel_x >= right_limit - 80 && rel_x < right_limit - 40 {
                 return Some((window.id, HitRegion::MaximizeButton));
+            }
+            // Check minimize button (left, 40px wide)
+            if rel_x >= right_limit - 120 && rel_x < right_limit - 80 {
+                return Some((window.id, HitRegion::MinimizeButton));
             }
             return Some((window.id, HitRegion::TitleBar));
         }

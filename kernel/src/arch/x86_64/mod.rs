@@ -6,6 +6,7 @@
 pub mod gdt;
 pub mod idt;
 pub mod syscall_entry;
+pub mod sse;
 #[allow(dead_code)]
 pub mod lapic;
 #[allow(dead_code)]

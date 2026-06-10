@@ -27,20 +27,47 @@ pub struct EncryptionEngine {
 }
 
 impl EncryptionEngine {
-    pub fn encrypt(&self, _lba: u64, data: &mut [u8]) {
+    pub fn encrypt(&self, lba: u64, data: &mut [u8]) {
         if !self.enabled { return; }
-        for i in 0..data.len() { data[i] ^= self.key[i % 32]; }
+        // Simple XTS-like XOR with LBA and Key
+        for i in 0..data.len() {
+            data[i] ^= self.key[i % 32] ^ (lba as u8).wrapping_add(i as u8);
+        }
     }
-    pub fn decrypt(&self, _lba: u64, data: &mut [u8]) {
+    pub fn decrypt(&self, lba: u64, data: &mut [u8]) {
         if !self.enabled { return; }
-        for i in 0..data.len() { data[i] ^= self.key[i % 32]; }
+        for i in 0..data.len() {
+            data[i] ^= self.key[i % 32] ^ (lba as u8).wrapping_add(i as u8);
+        }
     }
 }
 
 pub static ENCRYPTION: spin::Mutex<EncryptionEngine> = spin::Mutex::new(EncryptionEngine {
-    key: [0x55; 32],
-    enabled: false,
+    key: [0; 32],
+    enabled: false, // Default to false, enabled in init_encryption if pro
 });
+
+/// Initialize encryption with a hardware-backed key from the TPM.
+fn init_encryption() {
+    let mut eng = ENCRYPTION.lock();
+    
+    // Phase 36: Only allow FDE for Pro/Enterprise users
+    if !crate::security::license::is_pro() {
+        crate::serial_println!("[diskfs] Full-Disk Encryption disabled (Community Edition).");
+        return;
+    }
+
+    eng.enabled = true;
+    if let Some(tpm) = crate::drivers::tpm::TPM.lock().as_ref() {
+        if tpm.get_random(&mut eng.key).is_ok() {
+            crate::serial_println!("[diskfs] Hardware encryption key established via TPM.");
+            return;
+        }
+    }
+    // Fallback if no TPM
+    eng.key = [0xAC; 32];
+    crate::serial_println!("[diskfs] Warning: Using software fallback encryption key.");
+}
 
 fn read_sector_internal(lba: u64, buf: &mut [u8; 512]) -> Result<(), &'static str> {
     let mut success = false;
@@ -371,6 +398,8 @@ pub fn init() {
         crate::serial_println!("[diskfs] Using VirtIO primary.");
     }
     if !available { return; }
+
+    init_encryption();
 
     match DiskFs::mount() {
         Ok(fs) => { *DISK_FS.lock() = Some(fs); }

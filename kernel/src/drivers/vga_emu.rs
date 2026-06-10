@@ -113,7 +113,7 @@ impl VgaEmulator {
                     comp.fill_rect(x, y, 8, 16, bg);
                     // Draw character
                     if screen_char.ascii_character != b' ' {
-                        comp.draw_char(x, y, screen_char.ascii_character, fg);
+                        comp.draw_char(x, y, screen_char.ascii_character as char, fg);
                     }
                 }
             }

@@ -65,11 +65,8 @@ pub fn render() {
 
     desktop.frame_count += 1;
 
-    // ── Phase 1: Clear background ──
-    comp.clear(BG_PRIMARY);
-
-    // ── Phase 2: Draw background pattern (subtle grid) ──
-    draw_background_grid(comp, screen_w, screen_h);
+    // ── Phase 1: Draw wallpaper (dark gradient, no grid) ──
+    draw_wallpaper(comp, screen_w, screen_h);
 
     // ── Phase 2.5: Draw ghost snap preview ──
     if let Some((gx, gy, gw, gh)) = desktop.ghost_snap {
@@ -112,6 +109,79 @@ pub fn render() {
     if let Some(win) = desktop.wm.get_mut_by_title("Settings") {
         crate::apps::settings::sync_to_window(win);
     }
+    // Browser
+    if let Some(win) = desktop.wm.get_mut_by_title("Browser") {
+        crate::apps::browser::sync_to_window(win);
+    }
+    // Image Viewer
+    if let Some(win) = desktop.wm.get_mut_by_title("Image Viewer") {
+        crate::apps::image_viewer::sync_to_window(win);
+    }
+    // PDF Reader
+    if let Some(win) = desktop.wm.get_mut_by_title("PDF Reader") {
+        crate::apps::pdf_reader::sync_to_window(win);
+    }
+    // Video Player
+    if let Some(win) = desktop.wm.get_mut_by_title("Video Player") {
+        crate::apps::video_player::sync_to_window(win);
+    }
+    // Email Client
+    if let Some(win) = desktop.wm.get_mut_by_title("Email") {
+        crate::apps::email_client::sync_to_window(win);
+    }
+    // Office Suite
+    if let Some(win) = desktop.wm.get_mut_by_title("Office") {
+        crate::apps::office::sync_to_window(win);
+    }
+    // Browser v2 (bookmarks / downloads / history / reader)
+    if let Some(win) = desktop.wm.get_mut_by_title("Browser v2") {
+        crate::apps::browser_v2::sync_to_window(win);
+    }
+    // USB Mass Storage Manager
+    if let Some(win) = desktop.wm.get_mut_by_title("USB Storage") {
+        crate::apps::usb_storage::sync_to_window(win);
+    }
+    // App Store
+    if let Some(win) = desktop.wm.get_mut_by_title("App Store") {
+        crate::apps::app_store::sync_to_window(win);
+    }
+    // Power Manager
+    if let Some(win) = desktop.wm.get_mut_by_title("Power") {
+        crate::apps::power_manager::sync_to_window(win);
+    }
+    // Crash Recovery
+    if let Some(win) = desktop.wm.get_mut_by_title("Crash Recovery") {
+        crate::apps::crash_recovery::sync_to_window(win);
+    }
+    // Setup Wizard
+    if let Some(win) = desktop.wm.get_mut_by_title("Setup Wizard") {
+        crate::apps::setup_wizard::sync_to_window(win);
+    }
+    // Accessibility
+    if let Some(win) = desktop.wm.get_mut_by_title("Accessibility") {
+        crate::apps::accessibility::sync_to_window(win);
+    }
+    // Printer
+    if let Some(win) = desktop.wm.get_mut_by_title("Printer") {
+        crate::apps::printer::sync_to_window(win);
+    }
+    // Update Manager
+    if let Some(win) = desktop.wm.get_mut_by_title("Updates") {
+        crate::apps::update_manager::sync_to_window(win);
+    }
+    // Cloud Sync
+    if let Some(win) = desktop.wm.get_mut_by_title("Cloud Sync") {
+        crate::apps::cloud_sync::sync_to_window(win);
+    }
+    // Gaming
+    if let Some(win) = desktop.wm.get_mut_by_title("Gaming") {
+        crate::apps::gaming::sync_to_window(win);
+    }
+
+    // ── Phase 61: WM2 tiling — re-arrange windows if layout is not Float ──
+    if super::wm2::get_layout() != super::wm2::TilingLayout::Float {
+        super::wm2::apply_tiling(&mut desktop.wm, screen_w, screen_h);
+    }
 
     // ── Phase 5: Render all windows ──
     desktop.wm.render_all(comp);
@@ -130,16 +200,7 @@ pub fn render() {
     let window_list = desktop.wm.window_list();
     taskbar.render(comp, &window_list, uptime);
 
-    // ── Phase 8: Status line (above taskbar) ──
-    let status_y = screen_h.saturating_sub(TASKBAR_HEIGHT + 18);
-    let status_text = format!(
-        " Frame #{} | {} threads | Heap {}/{}K ",
-        desktop.frame_count,
-        threads,
-        heap_used / 1024,
-        (heap_used + heap_free) / 1024,
-    );
-    comp.draw_text(4, status_y, &status_text, TEXT_MUTED);
+    // Phase 8 slot: status info moved into taskbar system tray
 
     // ── Phase 9a: Toast notifications (above windows, below cursor) ──
     super::notification::render(comp, screen_w, screen_h);
@@ -147,27 +208,40 @@ pub fn render() {
     // ── Phase 9b: Context menu (above everything except cursor) ──
     super::context_menu::render(comp);
 
+    // ── Phase 60: CJK IME Candidate overlay ──
+    super::ime::render(comp);
+
     // ── Phase 9c: Mouse cursor (always on top) ──
     let (mx, my) = crate::drivers::mouse::position();
     super::mouse_cursor::draw_cursor(comp, mx as usize, my as usize);
 }
 
-/// Draw a subtle cyberpunk grid pattern on the background.
-fn draw_background_grid(comp: &mut Compositor, width: usize, height: usize) {
-    let grid_color = Color::rgb(12, 12, 24); // Very subtle
-    let grid_spacing = 40;
+/// Draw a modern dark gradient wallpaper.
+fn draw_wallpaper(comp: &mut Compositor, width: usize, height: usize) {
+    // Top: slightly lighter (dark blue-gray), bottom: darkest
+    let top_color = Color::rgb(26, 28, 38);
+    let bottom_color = Color::rgb(14, 14, 18);
+    let usable_h = height.saturating_sub(crate::gui::theme::TASKBAR_HEIGHT);
 
-    // Vertical lines
-    let mut x = 0;
-    while x < width {
-        comp.vline(x, 0, height, grid_color);
-        x += grid_spacing;
+    for y in 0..usable_h {
+        let factor = (y * 255 / usable_h.max(1)) as u8;
+        let row_color = top_color.blend(bottom_color, factor);
+        comp.hline(0, y, width, row_color);
     }
 
-    // Horizontal lines
-    let mut y = 0;
-    while y < height {
-        comp.hline(0, y, width, grid_color);
-        y += grid_spacing;
+    // Taskbar area — solid dark
+    comp.fill_rect(0, usable_h, width, crate::gui::theme::TASKBAR_HEIGHT, Color::rgb(14, 14, 18));
+
+    // Subtle radial-ish glow in center (just a lighter ellipse at center-top)
+    let cx = width / 2;
+    let glow = Color::rgb(30, 35, 50);
+    if height > 200 {
+        for dy in 0..80usize {
+            let spread = (80 - dy) * width / 160;
+            let gx = cx.saturating_sub(spread);
+            let gw = spread * 2;
+            let alpha = ((80 - dy) as u8).saturating_mul(2);
+            comp.hline(gx, dy, gw, top_color.blend(glow, alpha));
+        }
     }
 }

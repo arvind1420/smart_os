@@ -18,3 +18,7 @@ pub mod swap;
 #[allow(dead_code)]
 pub mod aslr;
 pub mod distributed;
+#[allow(dead_code)]
+pub mod oom;
+#[allow(dead_code)]
+pub mod cgroup;

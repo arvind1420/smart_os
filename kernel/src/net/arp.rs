@@ -5,7 +5,7 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use spin::Mutex;
-use super::{ethernet, LOCAL_IP, BROADCAST_MAC};
+use super::{ethernet, BROADCAST_MAC};
 
 const ARP_HW_ETHERNET: u16 = 1;
 const ARP_PROTO_IPV4: u16 = 0x0800;
@@ -43,7 +43,7 @@ pub fn handle_arp(payload: &[u8]) {
     match operation {
         ARP_OP_REQUEST => {
             // If they're asking for our MAC, send a reply
-            if target_ip == LOCAL_IP {
+            if target_ip == super::local_ip() {
                 send_arp_reply(sender_mac, sender_ip);
             }
         }
@@ -68,7 +68,7 @@ fn send_arp_reply(target_mac: [u8; 6], target_ip: [u8; 4]) {
     arp.push(4); // protocol address length
     arp.extend_from_slice(&ARP_OP_REPLY.to_be_bytes());
     arp.extend_from_slice(&our_mac);      // sender MAC (us)
-    arp.extend_from_slice(&LOCAL_IP);      // sender IP (us)
+    arp.extend_from_slice(&super::local_ip());      // sender IP (us)
     arp.extend_from_slice(&target_mac);    // target MAC
     arp.extend_from_slice(&target_ip);     // target IP
 
@@ -90,7 +90,7 @@ pub fn send_arp_request(target_ip: [u8; 4]) {
     arp.push(4);
     arp.extend_from_slice(&ARP_OP_REQUEST.to_be_bytes());
     arp.extend_from_slice(&our_mac);
-    arp.extend_from_slice(&LOCAL_IP);
+    arp.extend_from_slice(&super::local_ip());
     arp.extend_from_slice(&[0u8; 6]);     // target MAC = unknown
     arp.extend_from_slice(&target_ip);
 

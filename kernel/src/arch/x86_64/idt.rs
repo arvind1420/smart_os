@@ -107,6 +107,8 @@ unsafe extern "C" fn timer_interrupt_stub() {
 }
 
 extern "C" fn timer_interrupt_inner(ctx_rsp: u64) {
+    // Phase 51: profiling sample (fast path, no-op when disabled).
+    crate::profiler::sample(ctx_rsp);
     crate::drivers::timer::tick();
 
     // Waking logic
@@ -182,19 +184,48 @@ extern "x86-interrupt" fn double_fault_handler(stack_frame: InterruptStackFrame,
 
 extern "x86-interrupt" fn page_fault_handler(stack_frame: InterruptStackFrame, error_code: PageFaultErrorCode) {
     use x86_64::registers::control::Cr2;
-    let fault_addr = Cr2::read().unwrap();
-    serial_println!("[EXCEPTION] Page Fault at {:?} (RIP={:#X})", fault_addr, stack_frame.instruction_pointer);
-    panic!("Page fault");
+    x86_64::instructions::interrupts::disable();
+    let fault_addr = Cr2::read();
+    serial_println!(
+        "[EXCEPTION] Page Fault! RIP={:#X} CR2={:?} err={:?}",
+        stack_frame.instruction_pointer.as_u64(),
+        fault_addr,
+        error_code,
+    );
+    loop { x86_64::instructions::hlt(); }
 }
 
 extern "x86-interrupt" fn general_protection_fault_handler(stack_frame: InterruptStackFrame, error_code: u64) {
-    serial_println!("[EXCEPTION] GPF at {:#X} (code={})", stack_frame.instruction_pointer.as_u64(), error_code);
-    panic!("GPF");
+    x86_64::instructions::interrupts::disable();
+    serial_println!(
+        "[EXCEPTION] GPF! RIP={:#X} error_code={:#X}",
+        stack_frame.instruction_pointer.as_u64(),
+        error_code,
+    );
+    loop { x86_64::instructions::hlt(); }
 }
 
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
-    serial_println!("[EXCEPTION] Invalid Opcode at {:#?}", stack_frame.instruction_pointer);
-    panic!("Invalid opcode");
+    x86_64::instructions::interrupts::disable();
+    serial_println!("[EXCEPTION] Invalid Opcode at RIP={:#X}", stack_frame.instruction_pointer.as_u64());
+    // Walk the stack to find the return addresses leading to this crash.
+    // stack_frame.stack_pointer is RSP at the moment of the ud2/invalid opcode.
+    let rsp = stack_frame.stack_pointer.as_u64();
+    serial_println!("[EXCEPTION] RSP at crash: {:#X}", rsp);
+    unsafe {
+        for i in 0..16usize {
+            let addr = rsp + (i as u64) * 8;
+            let val = core::ptr::read_unaligned(addr as *const u64);
+            // Only print if value looks like a kernel text address
+            if val >= 0x8000_0000_0000 && val < 0x8100_0000_0000 {
+                serial_println!("  [RSP+{:#X}] = {:#X}  ← possible return addr (kernel offset: {:#X})",
+                    i * 8, val, val - 0x8000_0000_0000);
+            } else {
+                serial_println!("  [RSP+{:#X}] = {:#X}", i * 8, val);
+            }
+        }
+    }
+    loop { x86_64::instructions::hlt(); }
 }
 
 extern "x86-interrupt" fn divide_error_handler(stack_frame: InterruptStackFrame) {

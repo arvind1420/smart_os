@@ -152,6 +152,16 @@ pub fn load_module(name: &str, elf_data: &[u8]) -> Result<(), &'static str> {
     };
     
     LOADED_MODULES.lock().push(module);
+
+    // Phase 35: Measured Boot - Measure module into TPM PCR 9
+    if let Some(mut tpm) = crate::drivers::tpm::TPM.lock().as_mut() {
+        let mut hash = [0u8; 32];
+        // Simplified hash: XOR folding of the data
+        for (i, &b) in elf_data.iter().enumerate() {
+            hash[i % 32] ^= b;
+        }
+        tpm.extend_pcr(9, hash);
+    }
     
     // For this milestone, we'll look for a specific 'module_init' function name
     // in the symbol table if we had a proper one. 

@@ -14,6 +14,7 @@ pub mod rpc;
 pub mod db;
 pub mod ui;
 pub mod tensor;
+pub mod license;
 
 use core::panic::PanicInfo;
 

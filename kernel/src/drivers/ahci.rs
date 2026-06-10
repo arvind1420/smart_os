@@ -66,8 +66,16 @@ fn phys_offset() -> u64 {
     crate::memory::paging::phys_offset().as_u64()
 }
 
+/// Convert a virtual address in the HHDM to its physical address.
+/// Returns None if the address is not in the HHDM (e.g. stack or kernel-mapped).
+fn virt_to_phys_checked(virt: u64) -> Option<u64> {
+    let off = phys_offset();
+    if virt >= off { Some(virt - off) } else { None }
+}
+
 fn virt_to_phys(virt: u64) -> u64 {
-    virt - phys_offset()
+    virt_to_phys_checked(virt)
+        .expect("virt_to_phys: address not in HHDM — use a heap-allocated DMA buffer")
 }
 
 pub struct AhciPort {
@@ -141,9 +149,10 @@ impl AhciPort {
 
     /// Read disk capacity via IDENTIFY DEVICE.
     pub fn identify(&self) -> u64 {
-        let mut id_buf = [0u8; SECTOR_SIZE];
+        // Heap-allocate the buffer so it's in the HHDM range (required for DMA).
+        let mut id_buf = alloc::vec![0u8; SECTOR_SIZE];
         // Best-effort; fall back to 100 GiB if fails.
-        if self.issue_command(ATA_CMD_IDENTIFY, 0, &mut id_buf, false).is_ok() {
+        if self.issue_dma(ATA_CMD_IDENTIFY, 0, &mut id_buf, false).is_ok() {
             // Word 100..103 = 48-bit LBA total sectors.
             let lo = u64::from_le_bytes(id_buf[200..208].try_into().unwrap_or([0u8; 8]));
             if lo > 0 { return lo; }
@@ -151,8 +160,8 @@ impl AhciPort {
         100 * 1024 * 1024 * 2 // 100 GiB fallback
     }
 
-    /// Issue a DMA command for one sector at a time.
-    fn issue_command(&self, cmd: u8, lba: u64, buf: &mut [u8], is_write: bool) -> Result<(), &'static str> {
+    /// Issue a DMA command.  `buf` MUST be heap-allocated (in the HHDM range).
+    fn issue_dma(&self, cmd: u8, lba: u64, buf: &mut [u8], is_write: bool) -> Result<(), &'static str> {
         if !self.is_connected() { return Err("Port not connected"); }
 
         let sector_count = (buf.len() / SECTOR_SIZE) as u16;
@@ -162,7 +171,9 @@ impl AhciPort {
         let cmd_list_virt  = dma_virt + CMD_LIST_OFFSET as u64;
         let cmd_table_virt = dma_virt + CMD_TABLE_OFFSET as u64;
         let cmd_table_phys = virt_to_phys(cmd_table_virt);
-        let buf_phys       = virt_to_phys(buf.as_ptr() as u64);
+        // buf must be in HHDM; return error if not (avoids underflow)
+        let buf_phys = virt_to_phys_checked(buf.as_ptr() as u64)
+            .ok_or("AHCI: DMA buffer not in HHDM — must be heap-allocated")?;
 
         // Clear command table.
         unsafe {
@@ -224,14 +235,28 @@ impl AhciPort {
         Err("AHCI: transfer timeout")
     }
 
+    /// Read sectors via DMA — uses a heap bounce buffer if `buf` is not in HHDM.
     pub fn read_sectors(&self, lba: u64, buf: &mut [u8]) -> Result<(), &'static str> {
-        self.issue_command(ATA_CMD_READ_DMA_EXT, lba, buf, false)
+        if virt_to_phys_checked(buf.as_ptr() as u64).is_some() {
+            self.issue_dma(ATA_CMD_READ_DMA_EXT, lba, buf, false)
+        } else {
+            let mut bounce = alloc::vec![0u8; buf.len()];
+            self.issue_dma(ATA_CMD_READ_DMA_EXT, lba, &mut bounce, false)?;
+            buf.copy_from_slice(&bounce);
+            Ok(())
+        }
     }
 
+    /// Write sectors via DMA — uses a heap bounce buffer if `buf` is not in HHDM.
     pub fn write_sectors(&self, lba: u64, buf: &[u8]) -> Result<(), &'static str> {
-        // Safety: write only reads from buf, cast is safe.
-        let buf_mut = unsafe { core::slice::from_raw_parts_mut(buf.as_ptr() as *mut u8, buf.len()) };
-        self.issue_command(ATA_CMD_WRITE_DMA_EXT, lba, buf_mut, true)
+        if virt_to_phys_checked(buf.as_ptr() as u64).is_some() {
+            // SAFETY: DMA only reads from buf; cast to mut is safe here.
+            let buf_mut = unsafe { core::slice::from_raw_parts_mut(buf.as_ptr() as *mut u8, buf.len()) };
+            self.issue_dma(ATA_CMD_WRITE_DMA_EXT, lba, buf_mut, true)
+        } else {
+            let mut bounce = buf.to_vec();
+            self.issue_dma(ATA_CMD_WRITE_DMA_EXT, lba, &mut bounce, true)
+        }
     }
 }
 

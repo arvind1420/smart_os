@@ -115,9 +115,11 @@ pub extern "C" fn ap_rust_entry() -> ! {
     crate::serial_println!("[smp] AP {} online.", cpu_id);
 
     x86_64::instructions::interrupts::enable();
+    // APs do NOT call yield_now() — the cooperative scheduler uses a single
+    // global ready queue driven by the BSP's main_loop(). Multiple CPUs all
+    // calling yield_now() corrupts sched.current and causes threads to be
+    // double-scheduled. APs just idle until preempted for user threads.
     loop {
-        // Each AP runs the scheduler loop
-        crate::process::scheduler::yield_now();
         x86_64::instructions::hlt();
     }
 }

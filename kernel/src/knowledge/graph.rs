@@ -5,7 +5,7 @@
 /// All properties are stored as SmartPack Values for maximum flexibility.
 
 use alloc::collections::BTreeMap;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
@@ -277,11 +277,31 @@ impl KnowledgeGraph {
             ),
         ])
     }
+
+    /// Search for files matching a keyword in their path or metadata.
+    pub fn semantic_search(&self, query: &str) -> Vec<String> {
+        let mut results = Vec::new();
+        let query_lower = query.to_lowercase();
+
+        for node in self.find_by_type("file") {
+            if let Some(m) = node.properties.as_map() {
+                let path = m.iter().find(|(k, _)| k.as_str() == Some("path"))
+                    .and_then(|(_, v)| v.as_str()).unwrap_or("");
+                let category = m.iter().find(|(k, _)| k.as_str() == Some("category"))
+                    .and_then(|(_, v)| v.as_str()).unwrap_or("");
+
+                if path.to_lowercase().contains(&query_lower) || category.to_lowercase().contains(&query_lower) {
+                    results.push(String::from(path));
+                }
+            }
+        }
+        results
+    }
 }
 
 // ── Initialization ──────────────────────────────────────────────────
 
-/// Initialize the knowledge graph with system seed data.
+/// Initialize the knowledge graph with system seed data and start indexing.
 pub fn init() {
     let mut graph = KnowledgeGraph::new();
 
@@ -334,6 +354,50 @@ pub fn init() {
     graph.insert_edge(sys_id, _vfs_id, "contains", Value::Null).ok();
 
     *GRAPH.lock() = Some(graph);
+
+    // Start the AI Indexer thread (Phase 34)
+    crate::process::scheduler::spawn("ai-indexer", indexing_thread, 4);
+}
+
+fn indexing_thread() {
+    crate::serial_println!("[ai-indexer] Semantic indexing thread active.");
+    loop {
+        // Check for throttle mode (Phase 47)
+        if crate::ai::THROTTLE_MODE.load(core::sync::atomic::Ordering::Relaxed) {
+            for _ in 0..100 { crate::process::scheduler::yield_now(); }
+            continue;
+        }
+
+        {
+            let mut graph_lock = GRAPH.lock();
+            if let Some(ref mut graph) = *graph_lock {
+                // Find file nodes that haven't been classified yet
+                let file_ids: Vec<u64> = graph.find_by_type("file").iter()
+                    .filter(|n| n.properties.as_map().map(|m| !m.iter().any(|(k, _)| k.as_str() == Some("category"))).unwrap_or(true))
+                    .map(|n| n.id)
+                    .collect();
+
+                for id in file_ids {
+                    let path = if let Some(n) = graph.get_node(id) {
+                        n.properties.as_map().and_then(|m| m.iter().find(|(k, _)| k.as_str() == Some("path")).and_then(|(_, v)| v.as_str())).unwrap_or("").to_string()
+                    } else { continue; };
+
+                    if let Ok(data) = crate::vfs::read_file_full(&path) {
+                        if let Ok(result) = crate::ai::inference::classify_file_content(&data) {
+                            if let Some(node) = graph.nodes.get_mut(&id) {
+                                if let Value::Map(ref mut map) = node.properties {
+                                    map.push((Value::from("category"), Value::from(result.label)));
+                                    map.push((Value::from("confidence"), Value::Float32(result.confidence)));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Yield for a long time - indexing is low priority
+        for _ in 0..1000 { crate::process::scheduler::yield_now(); }
+    }
 }
 
 /// Get node count (for init logging).

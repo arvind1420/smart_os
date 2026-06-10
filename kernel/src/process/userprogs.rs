@@ -737,7 +737,7 @@ pub fn create_sdk_demo_elf() -> Vec<u8> {
     let mut code = Vec::new();
 
     // 1. Create Window (SYS_DISPLAY_CMD, CMD_CREATE_WINDOW, 400, 300)
-    emit_mov_reg_imm32(&mut code, Reg::Rax, 55); // SYS_DISPLAY_CMD
+    emit_mov_reg_imm32(&mut code, Reg::Rax, 63); // SYS_DISPLAY_CMD
     emit_mov_reg_imm32(&mut code, Reg::Rdi, 0);  // CMD_CREATE_WINDOW
     emit_mov_reg_imm32(&mut code, Reg::Rsi, 400); // Width
     emit_mov_reg_imm32(&mut code, Reg::Rdx, 300); // Height
@@ -746,7 +746,7 @@ pub fn create_sdk_demo_elf() -> Vec<u8> {
     emit_mov_reg_reg(&mut code, Reg::Rbx, Reg::Rax);
 
     // 2. Draw Text "SDK GUI + Network Demo"
-    emit_mov_reg_imm32(&mut code, Reg::Rax, 55);
+    emit_mov_reg_imm32(&mut code, Reg::Rax, 63);
     emit_mov_reg_imm32(&mut code, Reg::Rdi, 3); // CMD_DRAW_TEXT
     emit_mov_reg_reg(&mut code, Reg::Rsi, Reg::Rbx); // Window ID
     emit_mov_reg_imm32(&mut code, Reg::Rdx, (10 << 16) | 10); // X=10, Y=10
@@ -773,7 +773,7 @@ pub fn create_sdk_demo_elf() -> Vec<u8> {
     emit_mov_reg_reg(&mut code, Reg::Rcx, Reg::Rax);
 
     // 5. Draw "Connected!" in window
-    emit_mov_reg_imm32(&mut code, Reg::Rax, 55);
+    emit_mov_reg_imm32(&mut code, Reg::Rax, 63);
     emit_mov_reg_imm32(&mut code, Reg::Rdi, 3);
     emit_mov_reg_reg(&mut code, Reg::Rsi, Reg::Rbx);
     emit_mov_reg_imm32(&mut code, Reg::Rdx, (10 << 16) | 40);
@@ -815,7 +815,7 @@ pub fn create_stress_test_elf() -> Vec<u8> {
     emit_mov_reg_imm32(&mut code, Reg::Rbx, 20); // Loop counter
     let gui_loop = current_offset(&code);
     
-    emit_mov_reg_imm32(&mut code, Reg::Rax, 55); // SYS_DISPLAY_CMD
+    emit_mov_reg_imm32(&mut code, Reg::Rax, 63); // SYS_DISPLAY_CMD
     emit_mov_reg_imm32(&mut code, Reg::Rdi, 0);  // CMD_CREATE_WINDOW
     emit_mov_reg_imm32(&mut code, Reg::Rsi, 100); // Width
     emit_mov_reg_imm32(&mut code, Reg::Rdx, 100); // Height

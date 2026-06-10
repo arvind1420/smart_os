@@ -41,6 +41,7 @@ pub mod format;
 pub mod types;
 pub mod encode;
 pub mod decode;
+pub mod pkg;
 
 // Re-export key types for convenience
 pub use types::Value;

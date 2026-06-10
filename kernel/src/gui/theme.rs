@@ -1,10 +1,10 @@
-/// Smart OS Cyberpunk/Neon Dark Theme.
+/// Smart OS Modern Dark Theme.
 ///
-/// A futuristic visual theme with deep dark backgrounds,
-/// neon accent colors, and glowing effects.
+/// Windows 11-inspired dark mode with clean surfaces and
+/// vivid accent colors. Keeps neon accents for personality.
 
 /// A color in RGB format.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Color {
     pub r: u8,
     pub g: u8,
@@ -38,83 +38,83 @@ impl Color {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  NEON DARK THEME — Cyberpunk aesthetic
+//  MODERN DARK THEME — Windows 11-inspired
 // ═══════════════════════════════════════════════════════════════
 
-/// Deep space black — primary background
-pub const BG_PRIMARY: Color = Color::rgb(8, 8, 16);
-/// Slightly lighter — secondary panels
-pub const BG_SECONDARY: Color = Color::rgb(14, 14, 28);
-/// Panel/card background
-pub const BG_PANEL: Color = Color::rgb(18, 18, 36);
-/// Taskbar background
-pub const BG_TASKBAR: Color = Color::rgb(10, 10, 22);
-/// Window title bar
-pub const BG_TITLEBAR: Color = Color::rgb(20, 12, 40);
-/// Active window title bar
-pub const BG_TITLEBAR_ACTIVE: Color = Color::rgb(30, 15, 60);
+/// Dark surface — primary background (deep charcoal)
+pub const BG_PRIMARY: Color = Color::rgb(18, 18, 20);
+/// Elevated surface — secondary panels
+pub const BG_SECONDARY: Color = Color::rgb(28, 28, 32);
+/// Card/window content background
+pub const BG_PANEL: Color = Color::rgb(36, 36, 40);
+/// Taskbar background (frosted-style dark)
+pub const BG_TASKBAR: Color = Color::rgb(22, 22, 26);
+/// Inactive window title bar
+pub const BG_TITLEBAR: Color = Color::rgb(42, 42, 46);
+/// Active window title bar (slight blue tint)
+pub const BG_TITLEBAR_ACTIVE: Color = Color::rgb(40, 44, 58);
 
-/// Neon cyan — primary accent
-pub const ACCENT_CYAN: Color = Color::rgb(0, 255, 255);
-/// Neon magenta — secondary accent
-pub const ACCENT_MAGENTA: Color = Color::rgb(255, 0, 255);
-/// Neon green — success/active
-pub const ACCENT_GREEN: Color = Color::rgb(0, 255, 128);
-/// Neon orange — warning
-pub const ACCENT_ORANGE: Color = Color::rgb(255, 160, 0);
-/// Neon red — error/close
-pub const ACCENT_RED: Color = Color::rgb(255, 50, 50);
-/// Neon blue — info
-pub const ACCENT_BLUE: Color = Color::rgb(60, 120, 255);
-/// Neon purple — highlight
-pub const ACCENT_PURPLE: Color = Color::rgb(180, 60, 255);
+/// Windows blue — primary system accent
+pub const ACCENT_BLUE: Color = Color::rgb(0, 120, 212);
+/// Sky blue — lighter accent
+pub const ACCENT_CYAN: Color = Color::rgb(0, 188, 242);
+/// Magenta — secondary accent
+pub const ACCENT_MAGENTA: Color = Color::rgb(200, 60, 200);
+/// Success green
+pub const ACCENT_GREEN: Color = Color::rgb(22, 198, 12);
+/// Warning amber
+pub const ACCENT_ORANGE: Color = Color::rgb(255, 185, 0);
+/// Error/close red
+pub const ACCENT_RED: Color = Color::rgb(196, 43, 28);
+/// Purple — highlight
+pub const ACCENT_PURPLE: Color = Color::rgb(136, 23, 152);
 
 /// Bright white text
-pub const TEXT_PRIMARY: Color = Color::rgb(230, 230, 245);
-/// Dimmed text
-pub const TEXT_SECONDARY: Color = Color::rgb(140, 140, 170);
-/// Muted text
-pub const TEXT_MUTED: Color = Color::rgb(80, 80, 110);
+pub const TEXT_PRIMARY: Color = Color::rgb(242, 242, 242);
+/// Secondary text (slightly dimmed)
+pub const TEXT_SECONDARY: Color = Color::rgb(160, 160, 168);
+/// Muted/hint text
+pub const TEXT_MUTED: Color = Color::rgb(100, 100, 108);
 
-/// Window border (glowing effect — dimmed accent)
-pub const BORDER_GLOW: Color = Color::rgb(0, 180, 200);
-/// Inactive border
-pub const BORDER_INACTIVE: Color = Color::rgb(40, 40, 60);
+/// Active window border (accent blue)
+pub const BORDER_GLOW: Color = Color::rgb(0, 120, 212);
+/// Inactive border (subtle gray)
+pub const BORDER_INACTIVE: Color = Color::rgb(58, 58, 64);
 
 // ═══════════════════════════════════════════════════════════════
 //  Interactive Widget Colors
 // ═══════════════════════════════════════════════════════════════
 
 /// Text input background
-pub const BG_INPUT: Color = Color::rgb(12, 12, 30);
+pub const BG_INPUT: Color = Color::rgb(28, 28, 32);
 /// Focused text input background
-pub const BG_INPUT_FOCUSED: Color = Color::rgb(18, 18, 45);
+pub const BG_INPUT_FOCUSED: Color = Color::rgb(34, 34, 42);
 /// Button background
-pub const BG_BUTTON: Color = Color::rgb(20, 15, 45);
+pub const BG_BUTTON: Color = Color::rgb(44, 44, 52);
 /// Button hover
-pub const BG_BUTTON_HOVER: Color = Color::rgb(30, 20, 65);
-/// Neon text cursor color
-pub const CURSOR_COLOR: Color = Color::rgb(0, 255, 200);
+pub const BG_BUTTON_HOVER: Color = Color::rgb(58, 58, 68);
+/// Text cursor color
+pub const CURSOR_COLOR: Color = Color::rgb(0, 120, 212);
 /// Scrollbar track background
-pub const SCROLLBAR_BG: Color = Color::rgb(15, 15, 30);
+pub const SCROLLBAR_BG: Color = Color::rgb(30, 30, 34);
 /// Scrollbar thumb
-pub const SCROLLBAR_FG: Color = Color::rgb(60, 60, 100);
+pub const SCROLLBAR_FG: Color = Color::rgb(80, 80, 90);
 
 // ═══════════════════════════════════════════════════════════════
 //  Layout Constants
 // ═══════════════════════════════════════════════════════════════
 
-/// Taskbar height in pixels.
-pub const TASKBAR_HEIGHT: usize = 32;
-/// Window title bar height.
-pub const TITLEBAR_HEIGHT: usize = 24;
+/// Taskbar height in pixels (48 for modern look).
+pub const TASKBAR_HEIGHT: usize = 48;
+/// Window title bar height (28 for modern look).
+pub const TITLEBAR_HEIGHT: usize = 28;
 /// Window border width.
 pub const BORDER_WIDTH: usize = 1;
-/// Window corner radius (visual only, rendered as glow).
+/// Window glow/shadow size.
 pub const GLOW_SIZE: usize = 2;
 /// Widget internal padding.
 pub const WIDGET_PADDING: usize = 4;
 /// Text input widget height.
-pub const INPUT_HEIGHT: usize = 22;
+pub const INPUT_HEIGHT: usize = 24;
 /// Button widget height.
-pub const BUTTON_HEIGHT: usize = 24;
+pub const BUTTON_HEIGHT: usize = 28;

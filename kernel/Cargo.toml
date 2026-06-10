@@ -13,3 +13,10 @@ x86_64 = "0.15"
 uart_16550 = "0.3"
 spin = "0.9"
 linked_list_allocator = "0.10"
+
+# TLS 1.3 — pure-software crypto (no SIMD, safe on x86_64-unknown-none).
+# force-soft disables SHA-NI / SSE2 acceleration in sha2, keeping it as
+# pure u32 operations that LLVM can lower without SSE target features.
+sha2          = { version = "0.10", default-features = false, features = ["force-soft"] }
+hmac          = { version = "0.12", default-features = false }
+hkdf          = { version = "0.12", default-features = false }

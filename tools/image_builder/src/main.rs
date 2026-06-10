@@ -37,7 +37,7 @@ fn main() {
         let fs = fatfs::FileSystem::new(&mut file, fatfs::FsOptions::new()).unwrap();
         let bin_dir = fs.root_dir().create_dir("bin").unwrap();
 
-        let apps = ["browser", "games", "pkg_installer", "dashboard", "shell", "office", "spreadsheet", "presentation", "crm"];
+        let apps = ["browser", "games", "pkg_installer", "dashboard", "shell", "office", "spreadsheet", "presentation", "crm", "image_viewer", "pdf_reader", "video_player", "email_client"];
         let app_bin_dir = get_workspace_root().join("target/x86_64-unknown-none/release");
 
         for app_name in apps {

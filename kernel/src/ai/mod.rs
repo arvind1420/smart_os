@@ -18,6 +18,18 @@ pub mod synthesis;
 pub mod self_opt;
 pub mod quantum;
 
+pub static THROTTLE_MODE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Enable/disable low-power throttle mode for background AI tasks.
+pub fn set_throttle_mode(enabled: bool) {
+    THROTTLE_MODE.store(enabled, core::sync::atomic::Ordering::Relaxed);
+    if enabled {
+        crate::serial_println!("[ai] Background tasks throttled.");
+    } else {
+        crate::serial_println!("[ai] Background tasks resumed.");
+    }
+}
+
 /// Initialize the AI inference engine, NPU, and predictive models.
 pub fn init() {
     inference::init();

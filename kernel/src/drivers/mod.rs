@@ -15,6 +15,7 @@ pub mod e1000;
 pub mod nvme;
 pub mod drm;
 pub mod igpu;
+pub mod amdgpu;
 pub mod hpet;
 pub mod hda;
 
@@ -36,10 +37,15 @@ pub mod virtio;
 pub mod virtio_blk;
 #[allow(dead_code)]
 pub mod virtio_net;
+pub mod virtio_gpu;
+pub mod gpu_mem;
+pub mod gpu2d;
+pub mod display;
 #[allow(dead_code)]
 pub mod diskfs;
 #[allow(dead_code)]
 pub mod fat32;
+pub mod ext4;
 #[allow(dead_code)]
 pub mod acpi;
 pub mod xhci;
@@ -55,10 +61,18 @@ pub mod vga_emu;
 pub mod ahci;
 pub mod wifi;
 pub mod bluetooth;
+pub mod hda_new;
+pub mod hw_compat;
 pub mod ntfs;
 pub mod tpm;
 pub mod vulkan;
 pub mod bci;
+pub mod gles;
+pub mod glsl;
+pub mod gpu3d;
+pub mod compositor;
+pub mod font;
+pub mod image;
 
 /// Initialize core hardware drivers (PIC, timer, keyboard, mouse).
 pub fn init() {
@@ -75,6 +89,8 @@ pub fn init() {
     ahci::init();
     wifi::init();
     bluetooth::init();
+    hda_new::init();
+    hw_compat::init();
     ntfs::init();
     tpm::init();
     vulkan::init();

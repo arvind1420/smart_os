@@ -175,11 +175,18 @@ impl AcpiTables {
     fn find_in_rsdt(&self, rsdt_phys: u64, signature: &[u8; 4]) -> Option<u64> {
         let phys_offset = crate::memory::paging::phys_offset().as_u64();
         let header = unsafe { &*( (phys_offset + rsdt_phys) as *const SdtHeader ) };
-        let entries = (header.length as usize - size_of::<SdtHeader>()) / 4;
-        let entry_ptr = (phys_offset + rsdt_phys + size_of::<SdtHeader>() as u64) as *const u32;
+        let hdr_size = size_of::<SdtHeader>();
+        let total = header.length as usize;
+        if total < hdr_size { return None; }
+        let entries = (total - hdr_size) / 4;
+        if entries > 256 { return None; } // sanity cap
+        let entry_ptr = (phys_offset + rsdt_phys + hdr_size as u64) as *const u32;
 
         for i in 0..entries {
-            let table_phys = unsafe { *entry_ptr.add(i) } as u64;
+            let table_phys = unsafe { core::ptr::read_unaligned(entry_ptr.add(i)) } as u64;
+            if table_phys == 0 { continue; }
+            // Validate the table is within physical RAM (below 4 GiB limit for RSDT)
+            if table_phys >= 0xFFFF_0000 { continue; }
             let table_header = unsafe { &*( (phys_offset + table_phys) as *const SdtHeader ) };
             if &table_header.signature == signature {
                 return Some(table_phys);
@@ -190,12 +197,21 @@ impl AcpiTables {
 
     fn find_in_xsdt(&self, xsdt_phys: u64, signature: &[u8; 4]) -> Option<u64> {
         let phys_offset = crate::memory::paging::phys_offset().as_u64();
+        // Basic sanity: xsdt_phys must be reasonable
+        if xsdt_phys == 0 || xsdt_phys >= 0x1_0000_0000 { return None; }
         let header = unsafe { &*( (phys_offset + xsdt_phys) as *const SdtHeader ) };
-        let entries = (header.length as usize - size_of::<SdtHeader>()) / 8;
-        let entry_ptr = (phys_offset + xsdt_phys + size_of::<SdtHeader>() as u64) as *const u64;
+        let hdr_size = size_of::<SdtHeader>();
+        let total = header.length as usize;
+        if total < hdr_size { return None; }
+        let entries = (total - hdr_size) / 8;
+        if entries > 256 { return None; } // sanity cap
+        let entry_ptr = (phys_offset + xsdt_phys + hdr_size as u64) as *const u64;
 
         for i in 0..entries {
-            let table_phys = unsafe { *entry_ptr.add(i) };
+            let table_phys = unsafe { core::ptr::read_unaligned(entry_ptr.add(i)) };
+            if table_phys == 0 { continue; }
+            // Skip entries pointing above 4 GiB (MMIO / firmware regions not in RAM mapping)
+            if table_phys >= 0x1_0000_0000 { continue; }
             let table_header = unsafe { &*( (phys_offset + table_phys) as *const SdtHeader ) };
             if &table_header.signature == signature {
                 return Some(table_phys);

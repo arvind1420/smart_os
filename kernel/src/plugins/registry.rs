@@ -179,7 +179,9 @@ pub fn load_builtin_plugins() {
 fn mouse_plugin_entry() {
     crate::serial_println!("[plugin:ps2-mouse] Mouse driver plugin running.");
     loop {
-        if let Some(event) = crate::drivers::mouse::read_event() {
+        // Poll PS/2 directly in case IRQ12 isn't delivered (LAPIC active)
+        crate::drivers::mouse::poll();
+        while let Some(event) = crate::drivers::mouse::read_event() {
             crate::gui::handle_mouse_event(event);
         }
         crate::process::scheduler::yield_now();

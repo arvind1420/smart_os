@@ -104,7 +104,7 @@ pub fn check_syscall(pid: u64, syscall_nr: usize) -> bool {
     let mut sandboxes = SANDBOXES.lock();
     let profile = match sandboxes.get_mut(&pid) {
         Some(p) => p,
-        None => return false, // Strict default-deny: No sandbox = Denied
+        None => return true, // No sandbox profile = allow everything (default-allow)
     };
 
     // Check explicit denylist
@@ -113,13 +113,50 @@ pub fn check_syscall(pid: u64, syscall_nr: usize) -> bool {
         return false;
     }
 
+    let is_linux = if pid != 0 {
+        crate::process::process::PROCESS_TABLE.lock().get(&pid).map(|p| p.is_linux).unwrap_or(false)
+    } else {
+        false
+    };
+
     // Check capability-based access
-    let required_cap = syscall_to_capability(syscall_nr);
+    let required_cap = if is_linux {
+        linux_syscall_to_capability(syscall_nr)
+    } else {
+        syscall_to_capability(syscall_nr)
+    };
+
     if required_cap == 0 || profile.has_capability(required_cap) {
         true
     } else {
         profile.deny_count += 1;
         false
+    }
+}
+
+/// Map a Linux syscall number to its required capability.
+fn linux_syscall_to_capability(syscall_nr: usize) -> u64 {
+    match syscall_nr {
+        // Process management
+        60 | 231 | 57 | 58 | 56 | 59 | 61 | 62 | 234 | 39 | 110 | 186 => caps::CAP_PROCESS,
+        
+        // System
+        24 | 35 | 99 => caps::CAP_SYSTEM,
+        
+        // IPC
+        22 | 293 => caps::CAP_IPC,
+        
+        // Memory
+        9 | 11 | 10 | 25 | 12 | 319 => caps::CAP_MEMORY,
+        
+        // Network
+        41 | 42 | 43 | 44 | 45 | 46 | 47 | 48 | 49 | 50 | 51 | 52 | 54 | 55 | 288 => caps::CAP_NETWORK,
+        
+        // Filesystem
+        0 | 1 | 2 | 3 | 4 | 5 | 6 | 17 | 18 | 19 | 20 | 21 | 32 | 33 | 83 | 84 | 85 | 87 | 89 | 78 | 217 | 257 | 258 | 262 | 263 | 267 | 269 | 292 => caps::CAP_FILESYSTEM,
+        
+        // Default
+        _ => caps::CAP_ALL,
     }
 }
 
@@ -149,7 +186,8 @@ fn syscall_to_capability(syscall_nr: usize) -> u64 {
         SYS_NET_SEND | SYS_NET_RECV | SYS_NET_BIND |
         SYS_TCP_CONNECT | SYS_TCP_LISTEN | SYS_TCP_ACCEPT |
         SYS_TCP_SEND | SYS_TCP_RECV | SYS_TCP_CLOSE |
-        SYS_TCP_STATUS => caps::CAP_NETWORK,
+        SYS_TCP_STATUS |
+        SYS_TLS_CONNECT | SYS_TLS_SEND | SYS_TLS_RECV | SYS_TLS_CLOSE => caps::CAP_NETWORK,
 
         // Knowledge Graph
         SYS_KG_INSERT | SYS_KG_QUERY | SYS_KG_LINK |

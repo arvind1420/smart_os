@@ -165,6 +165,12 @@ extern "C" fn syscall_dispatcher(frame: *const SyscallFrame) -> u64 {
         );
     }
 
+    // Sandbox capability check for native Smart OS processes
+    if pid != 0 && !crate::security::sandbox::check_syscall(pid, frame.nr as usize) {
+        crate::security::audit::log_denied_syscall(pid, frame.nr, "sandbox");
+        return u64::MAX; // EPERM
+    }
+
     use crate::syscall::table::*;
     match frame.nr as usize {
         SYS_EXIT => {
@@ -404,6 +410,65 @@ extern "C" fn syscall_dispatcher(frame: *const SyscallFrame) -> u64 {
                 Err(_) => u64::MAX,
             }
         }
+        SYS_TLS_CONNECT => {
+            let host_ptr = frame.rdi;
+            let host_len = frame.rsi as usize;
+            let port = frame.rdx as u16;
+            if host_ptr >= 0x0000_8000_0000_0000 || host_len > 256 {
+                return u64::MAX;
+            }
+            let host_bytes = unsafe { core::slice::from_raw_parts(host_ptr as *const u8, host_len) };
+            if let Ok(host) = core::str::from_utf8(host_bytes) {
+                match crate::syscall::handlers::sys_tls_connect(host, port) {
+                    Ok(id) => id as u64,
+                    Err(_) => u64::MAX,
+                }
+            } else {
+                u64::MAX
+            }
+        }
+        SYS_TLS_SEND => {
+            let id = frame.rdi as u32;
+            let buf_ptr = frame.rsi;
+            let len = frame.rdx as usize;
+            if buf_ptr >= 0x0000_8000_0000_0000 || len > 0x10000 {
+                return u64::MAX;
+            }
+            let mut safe_buf = alloc::vec![0u8; len];
+            if crate::memory::paging::copy_from_user(&mut safe_buf, buf_ptr).is_err() {
+                return u64::MAX;
+            }
+            match crate::syscall::handlers::sys_tls_send(id, &safe_buf) {
+                Ok(()) => 0,
+                Err(_) => u64::MAX,
+            }
+        }
+        SYS_TLS_RECV => {
+            let id = frame.rdi as u32;
+            let buf_ptr = frame.rsi;
+            let len = frame.rdx as usize;
+            if buf_ptr >= 0x0000_8000_0000_0000 || len > 0x10000 {
+                return u64::MAX;
+            }
+            let mut safe_buf = alloc::vec![0u8; len];
+            match crate::syscall::handlers::sys_tls_recv(id, &mut safe_buf) {
+                Ok(n) => {
+                    if crate::memory::paging::copy_to_user(buf_ptr, &safe_buf[..n]).is_ok() {
+                        n as u64
+                    } else {
+                        u64::MAX
+                    }
+                }
+                Err(_) => u64::MAX,
+            }
+        }
+        SYS_TLS_CLOSE => {
+            let id = frame.rdi as u32;
+            match crate::syscall::handlers::sys_tls_close(id) {
+                Ok(()) => 0,
+                Err(_) => u64::MAX,
+            }
+        }
         SYS_DISPLAY_CMD => {
             let pid = crate::process::scheduler::current_pid().unwrap_or(0);
             crate::gui::display_server::handle_cmd(pid, frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8)
@@ -427,6 +492,125 @@ extern "C" fn syscall_dispatcher(frame: *const SyscallFrame) -> u64 {
             match crate::process::fd::with_fd_table(pid, |t| t.dup2(old_fd, new_fd)) {
                 Ok(Ok(())) => 0,
                 _ => u64::MAX,
+            }
+        }
+        SYS_KMOD_LOAD => {
+            let path_ptr = frame.rdi;
+            let path_len = frame.rsi as usize;
+            if path_ptr >= 0x0000_8000_0000_0000 || path_len > 256 { return u64::MAX; }
+            let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len) };
+            if let Ok(path) = core::str::from_utf8(path_bytes) {
+                match crate::syscall::handlers::sys_kmod_load(path) {
+                    Ok(()) => 0,
+                    Err(_) => u64::MAX,
+                }
+            } else {
+                u64::MAX
+            }
+        }
+        SYS_AI_INFER => {
+            let in_ptr = frame.rdi;
+            let in_len = frame.rsi as usize;
+            let out_ptr = frame.rdx;
+            let out_len = frame.r10 as usize;
+            if in_ptr >= 0x0000_8000_0000_0000 || in_len > 0x10000 { return u64::MAX; }
+            let in_bytes = unsafe { core::slice::from_raw_parts(in_ptr as *const u8, in_len) };
+            if let Ok(input) = core::str::from_utf8(in_bytes) {
+                let out_buf = unsafe { core::slice::from_raw_parts_mut(out_ptr as *mut u8, out_len) };
+                match crate::syscall::handlers::sys_ai_infer(input, out_buf) {
+                    Ok(n) => n as u64,
+                    Err(_) => u64::MAX,
+                }
+            } else {
+                u64::MAX
+            }
+        }
+        SYS_AI_SEARCH => {
+            let query_ptr = frame.rdi;
+            let query_len = frame.rsi as usize;
+            let out_ptr = frame.rdx;
+            let out_len = frame.r10 as usize;
+            if query_ptr >= 0x0000_8000_0000_0000 || query_len > 1024 { return u64::MAX; }
+            let query_bytes = unsafe { core::slice::from_raw_parts(query_ptr as *const u8, query_len) };
+            if let Ok(query) = core::str::from_utf8(query_bytes) {
+                let out_buf = unsafe { core::slice::from_raw_parts_mut(out_ptr as *mut u8, out_len) };
+                match crate::syscall::handlers::sys_ai_search(query, out_buf) {
+                    Ok(n) => n as u64,
+                    Err(_) => u64::MAX,
+                }
+            } else {
+                u64::MAX
+            }
+        }
+        SYS_AUDIT_READ => {
+            let out_ptr = frame.rdi;
+            let out_len = frame.rsi as usize;
+            if out_ptr >= 0x0000_8000_0000_0000 || out_len > 4096 { return u64::MAX; }
+            let out_buf = unsafe { core::slice::from_raw_parts_mut(out_ptr as *mut u8, out_len) };
+            match crate::syscall::handlers::sys_audit_read(out_buf) {
+                Ok(n) => n as u64,
+                Err(_) => u64::MAX,
+            }
+        }
+        SYS_LICENSE_CHECK => {
+            crate::syscall::handlers::sys_license_check()
+        }
+        SYS_TTS_SAY => {
+            let text_ptr = frame.rdi;
+            let text_len = frame.rsi as usize;
+            if text_ptr >= 0x0000_8000_0000_0000 || text_len > 1024 { return u64::MAX; }
+            let text_bytes = unsafe { core::slice::from_raw_parts(text_ptr as *const u8, text_len) };
+            if let Ok(text) = core::str::from_utf8(text_bytes) {
+                match crate::syscall::handlers::sys_tts_say(text) {
+                    Ok(()) => 0,
+                    Err(_) => u64::MAX,
+                }
+            } else {
+                u64::MAX
+            }
+        }
+        SYS_UI_TRAVERSE => {
+            let out_ptr = frame.rdi;
+            let out_len = frame.rsi as usize;
+            if out_ptr >= 0x0000_8000_0000_0000 || out_len > 4096 { return u64::MAX; }
+            let out_buf = unsafe { core::slice::from_raw_parts_mut(out_ptr as *mut u8, out_len) };
+            match crate::syscall::handlers::sys_ui_traverse(out_buf) {
+                Ok(n) => n as u64,
+                Err(_) => u64::MAX,
+            }
+        }
+        SYS_GAMEPAD_STATE => {
+            let out_ptr = frame.rdi;
+            let out_len = frame.rsi as usize;
+            if out_ptr >= 0x0000_8000_0000_0000 || out_len > 1024 { return u64::MAX; }
+            let out_buf = unsafe { core::slice::from_raw_parts_mut(out_ptr as *mut u8, out_len) };
+            match crate::syscall::handlers::sys_gamepad_state(out_buf) {
+                Ok(n) => n as u64,
+                Err(_) => u64::MAX,
+            }
+        }
+        SYS_SET_GAME_MODE => {
+            let active = frame.rdi != 0;
+            match crate::syscall::handlers::sys_set_game_mode(active) {
+                Ok(()) => 0,
+                Err(_) => u64::MAX,
+            }
+        }
+        SYS_FLEET_COMMAND => {
+            let cmd_ptr = frame.rdi;
+            let cmd_len = frame.rsi as usize;
+            let par_ptr = frame.rdx;
+            let par_len = frame.r10 as usize;
+            if cmd_ptr >= 0x0000_8000_0000_0000 || par_ptr >= 0x0000_8000_0000_0000 { return u64::MAX; }
+            let cmd_bytes = unsafe { core::slice::from_raw_parts(cmd_ptr as *const u8, cmd_len) };
+            let par_bytes = unsafe { core::slice::from_raw_parts(par_ptr as *const u8, par_len) };
+            if let (Ok(cmd), Ok(par)) = (core::str::from_utf8(cmd_bytes), core::str::from_utf8(par_bytes)) {
+                match crate::syscall::handlers::sys_fleet_command(cmd, par) {
+                    Ok(()) => 0,
+                    Err(_) => u64::MAX,
+                }
+            } else {
+                u64::MAX
             }
         }
         SYS_TENSOR_CREATE => {

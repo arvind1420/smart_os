@@ -10,6 +10,8 @@ pub const CMD_REDRAW: u64 = 6;
 pub const CMD_ADD_WIDGET: u64 = 7;
 pub const CMD_HUB_PUBLISH: u64 = 8;
 pub const CMD_HUB_QUERY: u64 = 9;
+pub const CMD_DRAW_TEXT_TTF: u64 = 10;
+pub const CMD_DRAW_IMAGE: u64 = 11;
 
 pub const WIDGET_BUTTON: u64 = 0;
 
@@ -42,10 +44,21 @@ impl Window {
         syscall5(SYS_DISPLAY_CMD, CMD_DRAW_TEXT, self.id, xy_packed, text.as_ptr() as u64, text.len() as u64);
     }
 
+    pub fn draw_text_ttf(&self, x: u16, y: u16, size: u16, text: &str) {
+        let xy_size_packed = ((x as u64) << 32) | ((y as u64) << 16) | (size as u64);
+        syscall5(SYS_DISPLAY_CMD, CMD_DRAW_TEXT_TTF, self.id, xy_size_packed, text.as_ptr() as u64, text.len() as u64);
+    }
+
     pub fn fill_rect(&self, x: u16, y: u16, w: u16, h: u16, color: u32) {
         let xy_packed = ((x as u64) << 16) | (y as u64);
         let wh_packed = ((w as u64) << 16) | (h as u64);
         syscall5(SYS_DISPLAY_CMD, CMD_FILL_RECT, self.id, xy_packed, wh_packed, color as u64);
+    }
+
+    pub fn draw_image(&self, x: u16, y: u16, w: u16, h: u16, pixels: &[u8]) {
+        let xy_packed = ((x as u64) << 16) | (y as u64);
+        let wh_packed = ((w as u64) << 16) | (h as u64);
+        syscall5(SYS_DISPLAY_CMD, CMD_DRAW_IMAGE, self.id, xy_packed, wh_packed, pixels.as_ptr() as u64);
     }
 
     pub fn clear(&self) {

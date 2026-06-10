@@ -17,6 +17,8 @@ pub const VIRTIO_VENDOR: u16 = 0x1AF4;
 pub const VIRTIO_BLK_DEV: u16 = 0x1001;
 /// VirtIO legacy network device ID.
 pub const VIRTIO_NET_DEV: u16 = 0x1000;
+/// VirtIO GPU device ID (virtio-vga / virtio-gpu-pci).
+pub const VIRTIO_GPU_DEV: u16 = 0x1050;
 
 /// A discovered PCI device.
 #[derive(Debug, Clone, Copy)]
@@ -251,6 +253,16 @@ pub fn bar0_io_base(dev: &PciDevice) -> Option<u16> {
     }
 }
 
+/// Get the I/O port base from BAR1 (e.g., AC'97 NABM bus-master registers).
+pub fn bar1_io_base(dev: &PciDevice) -> Option<u16> {
+    let bar1 = dev.bars[1];
+    if bar1 & 1 == 1 {
+        Some((bar1 & 0xFFFF_FFFC) as u16)
+    } else {
+        None
+    }
+}
+
 /// Initialize: scan PCI bus and log discovered devices.
 /// Return all PCI devices (re-scans bus each call for fresh results).
 pub fn list_devices() -> alloc::vec::Vec<PciDevice> {
@@ -264,6 +276,7 @@ pub fn init() {
         let kind = match (dev.vendor_id, dev.device_id) {
             (VIRTIO_VENDOR, VIRTIO_BLK_DEV) => "VirtIO Block",
             (VIRTIO_VENDOR, VIRTIO_NET_DEV) => "VirtIO Net",
+            (VIRTIO_VENDOR, VIRTIO_GPU_DEV) => "VirtIO GPU",
             (VIRTIO_VENDOR, _) => "VirtIO (other)",
             _ => "",
         };

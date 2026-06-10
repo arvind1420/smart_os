@@ -65,6 +65,9 @@ pub fn init() {
         (*pcpu_ptr) = Some(pcpu);
         
         let pcpu_ref = (*pcpu_ptr).as_mut().unwrap();
+        // Fix stale self_ptr: after the move into BSP_PER_CPU, update self_ptr
+        // to point to the new location (pcpu was on the stack, now it's static).
+        pcpu_ref.self_ptr = pcpu_ref as *const _;
         let (gdt, selectors) = create_gdt(&pcpu_ref.tss);
         
         let gdt_ptr = &raw mut BSP_GDT;

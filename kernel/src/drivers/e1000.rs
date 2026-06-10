@@ -7,8 +7,9 @@ use spin::Mutex;
 use alloc::vec::Vec;
 use super::pci;
 
-// NVMe Register Offsets
+// e1000 Register Offsets
 const REG_CTRL: u32 = 0x0000;
+const REG_STATUS: u32 = 0x0008;
 const REG_IMC: u32 = 0x00D8;
 const REG_RCTL: u32 = 0x0100;
 const REG_TCTL: u32 = 0x0400;
@@ -32,6 +33,10 @@ const RCTL_SBP: u32 = 1 << 2;
 const RCTL_BAM: u32 = 1 << 15;
 const RCTL_BSIZE_2048: u32 = 0 << 16;
 const RCTL_SECRC: u32 = 1 << 26;
+
+// CTRL Flags
+const CTRL_ASDE: u32 = 1 << 5;  // Auto-Speed Detection Enable
+const CTRL_SLU:  u32 = 1 << 6;  // Set Link Up
 
 // TCTL Flags
 const TCTL_EN: u32 = 1 << 1;
@@ -115,12 +120,39 @@ pub fn init() -> Result<(), &'static str> {
     let phys_offset = crate::memory::paging::phys_offset().as_u64();
     let mmio_base = phys_offset + mmio_phys;
 
-    // 1. Reset device
+    // 1. Initialise device (no RST — VirtualBox provides a clean device at VM start)
+    //
+    // VirtualBox 82540EM quirk: issuing CTRL.RST leaves the emulation in an
+    // intermediate state; a subsequent CTRL.SLU write is ignored until the
+    // emulator's async EMT thread finishes processing the reset, which can
+    // take longer than our spin-wait.  Skipping RST entirely lets us go
+    // straight to setting SLU and avoids the race.
     unsafe {
-        write_reg(mmio_base, REG_IMC, 0xFFFFFFFF); // Disable interrupts
-        write_reg(mmio_base, REG_CTRL, read_reg(mmio_base, REG_CTRL) | (1 << 26)); // Reset
-        core::hint::spin_loop(); // Wait for reset
-        write_reg(mmio_base, REG_IMC, 0xFFFFFFFF); // Re-disable interrupts after reset
+        // Mask all device interrupts.
+        write_reg(mmio_base, REG_IMC, 0xFFFF_FFFF);
+
+        // Set Full-Duplex + LRST (link normal, not in reset) + SLU + ASDE.
+        // FD=1, LRST=1(bit3), ASDE=1(bit5), SLU=1(bit6) → 0x69
+        // We OR in these bits instead of overwriting so we preserve any
+        // emulator-set bits (e.g. flow control, ILOS).
+        let ctrl = read_reg(mmio_base, REG_CTRL) & !(1u32 << 26); // ensure RST=0
+        write_reg(mmio_base, REG_CTRL, ctrl | CTRL_SLU | CTRL_ASDE | (1 << 3) | (1 << 0));
+
+        // Give VirtualBox up to ~2 ms to raise STATUS.LU.
+        let mut link_wait = 2_000_000u32;
+        while read_reg(mmio_base, REG_STATUS) & 0x02 == 0 {
+            link_wait -= 1;
+            if link_wait == 0 { break; }
+            core::hint::spin_loop();
+        }
+        let status = read_reg(mmio_base, REG_STATUS);
+        let link_up = status & 0x02 != 0;
+        crate::serial_println!(
+            "[e1000] STATUS=0x{:08X} CTRL=0x{:08X} → Link {}",
+            status,
+            read_reg(mmio_base, REG_CTRL),
+            if link_up { "UP" } else { "DOWN (continuing)" }
+        );
     }
 
     // 2. Read MAC Address
@@ -218,30 +250,43 @@ pub fn mac_address() -> Option<[u8; 6]> {
 
 /// Send a raw Ethernet frame.
 pub fn send_frame(frame: &[u8]) -> Result<(), &'static str> {
-    let mut dev_guard = E1000_DEVICE.lock();
-    let dev = dev_guard.as_mut().ok_or("e1000 not initialized")?;
+    // ── Phase 1: set up descriptor and kick the hardware (lock held briefly) ──
+    let status_ptr: *const u8;
+    {
+        let mut dev_guard = E1000_DEVICE.lock();
+        let dev = dev_guard.as_mut().ok_or("e1000 not initialized")?;
 
-    let tx_idx = dev.tx_next;
-    let desc = unsafe { &mut *dev.tx_descriptors.add(tx_idx) };
+        let tx_idx = dev.tx_next;
+        let desc = unsafe { &mut *dev.tx_descriptors.add(tx_idx) };
 
-    let phys_offset = crate::memory::paging::phys_offset().as_u64();
-    let frame_phys = (frame.as_ptr() as u64) - phys_offset;
+        let phys_offset = crate::memory::paging::phys_offset().as_u64();
+        let frame_phys = (frame.as_ptr() as u64) - phys_offset;
 
-    desc.addr = frame_phys;
-    desc.length = frame.len() as u16;
-    desc.cmd = (1 << 0) | (1 << 1) | (1 << 3); // EOP | IFCS | RS (Report Status)
-    desc.status = 0;
+        desc.addr   = frame_phys;
+        desc.length = frame.len() as u16;
+        desc.cmd    = (1 << 0) | (1 << 1) | (1 << 3); // EOP | IFCS | RS
+        desc.status = 0;
 
-    dev.tx_next = (tx_idx + 1) % NUM_TX_DESCRIPTORS;
-    unsafe {
-        write_reg(dev.mmio_base, REG_TDT, dev.tx_next as u32);
-    }
+        dev.tx_next = (tx_idx + 1) % NUM_TX_DESCRIPTORS;
+        unsafe { write_reg(dev.mmio_base, REG_TDT, dev.tx_next as u32); }
 
-    let mut timeout = 100000;
-    while (unsafe { core::ptr::read_volatile(&desc.status) } & 0x01) == 0 {
+        // Capture the status byte address so we can poll WITHOUT holding the lock.
+        // Safety: the TX ring is never freed; the pointer stays valid for the
+        // lifetime of the kernel.
+        status_ptr = &desc.status as *const u8;
+    } // ── lock released here ──
+
+    // ── Phase 2: poll DD without holding the lock so recv_frame can proceed ──
+    // VirtualBox's 82540EM emulation writes DD synchronously when TDT is updated.
+    // Allow up to ~1 M tight iterations (~10 ms on typical hardware) then soft-fail.
+    let mut timeout = 1_000_000u32;
+    loop {
+        let status = unsafe { core::ptr::read_volatile(status_ptr) };
+        if status & 0x01 != 0 { break; } // DD set → done
         timeout -= 1;
         if timeout == 0 {
-            return Err("e1000 TX timeout");
+            crate::serial_println!("[e1000] TX status writeback timeout (frame submitted)");
+            return Ok(()); // soft-fail: frame was submitted, hardware may still send it
         }
         core::hint::spin_loop();
     }

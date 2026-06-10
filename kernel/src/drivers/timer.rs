@@ -38,6 +38,8 @@ pub fn tick() {
     // Update RTC cached time once per second (~100 ticks)
     if t % 100 == 0 {
         super::rtc::update();
+        // Phase 52: check memory pressure every ~1 second.
+        crate::memory::oom::check_and_act();
     }
 }
 

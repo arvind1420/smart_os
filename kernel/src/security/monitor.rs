@@ -94,6 +94,11 @@ impl ProcessMonitor {
             && self.file_write_count > MASS_OPEN_THRESHOLD
         {
             self.flagged = true;
+            crate::security::log_audit(
+                crate::security::AuditEventType::SyscallAnomaly,
+                pid as u32,
+                "Mass file operations detected (Heuristic Ransomware Pattern)"
+            );
             crate::serial_println!(
                 "[security] HEURISTIC ALERT: Mass file operations detected \
                  (opens={}, writes={})",
@@ -243,6 +248,11 @@ fn anomaly_worker_thread() {
                 monitor.last_score = score;
                 if score > FREEZE_THRESHOLD {
                     monitor.flagged = true;
+                    crate::security::log_audit(
+                        crate::security::AuditEventType::SyscallAnomaly,
+                        pid as u32,
+                        &alloc::format!("AI Anomaly detected (score={:.2})", score)
+                    );
                     crate::serial_println!(
                         "[security] AI ALERT: Background monitor flagged pid {} with score {:.2}",
                         pid, score

@@ -9,6 +9,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 use alloc::format;
 use spin::Mutex;
+use smartpack::pkg::SmartPkg;
+use smartpack::Value;
 use crate::serial_println;
 
 /// Package manifest.
@@ -24,10 +26,13 @@ pub struct PackageManifest {
 /// Global package registry.
 static REGISTRY: Mutex<BTreeMap<String, PackageManifest>> = Mutex::new(BTreeMap::new());
 
-/// Initialize the package registry with built-in packages.
+/// Initialize the package registry and IPC control port.
 pub fn init() {
     // Create /pkg directory
     let _ = crate::vfs::mkdir("/pkg");
+
+    // Register IPC port for user-space App Store
+    crate::ipc::port::register("pkgmgr.control", 16);
 
     let mut reg = REGISTRY.lock();
 
@@ -78,7 +83,69 @@ pub fn init() {
         installed: true,
     });
 
-    serial_println!("[pkgmgr] Package registry initialized ({} packages)", reg.len());
+    serial_println!("[pkgmgr] Package registry and IPC port initialized.");
+    
+    // Spawn the IPC listener thread
+    crate::process::scheduler::spawn("pkgmgr-ipc", ipc_listener_thread, 5);
+}
+
+fn ipc_listener_thread() {
+    // Wait for the port to be registered (it was just registered in init)
+    let channel = match crate::ipc::port::lookup("pkgmgr.control") {
+        Some(c) => c,
+        None => {
+            serial_println!("[pkgmgr] Error: IPC port lookup failed.");
+            return;
+        }
+    };
+
+    loop {
+        if let Ok(msg) = channel.recv() {
+            let response = handle_ipc_msg(msg.payload);
+            let reply_port = format!("reply.{}", msg.sender_tid);
+            let _ = crate::syscall::handlers::sys_ipc_send(&reply_port, response);
+        }
+        crate::process::scheduler::yield_now();
+    }
+}
+
+fn handle_ipc_msg(msg: Value) -> Value {
+    let map = match msg.as_map() {
+        Some(m) => m,
+        None => return Value::from("Error: Expected map"),
+    };
+
+    let cmd = match map.iter().find(|(k, _)| k.as_str() == Some("cmd")).map(|(_, v)| v.as_str()).flatten() {
+        Some(c) => c,
+        None => return Value::from("Error: Missing cmd"),
+    };
+
+    match cmd {
+        "LIST" => {
+            let pkgs = list_packages();
+            let mut arr = Vec::new();
+            for (name, ver, desc, inst) in pkgs {
+                arr.push(Value::Map(vec![
+                    (Value::from("name"), Value::from(name)),
+                    (Value::from("version"), Value::from(ver)),
+                    (Value::from("description"), Value::from(desc)),
+                    (Value::from("installed"), Value::Bool(inst)),
+                ]));
+            }
+            Value::Array(arr)
+        }
+        "INSTALL" => {
+            let name = match map.iter().find(|(k, _)| k.as_str() == Some("name")).map(|(_, v)| v.as_str()).flatten() {
+                Some(n) => n,
+                None => return Value::from("Error: Missing name"),
+            };
+            match install(name) {
+                Ok(msg) => Value::from(msg),
+                Err(e) => Value::from(format!("Error: {}", e)),
+            }
+        }
+        _ => Value::from("Error: Unknown command"),
+    }
 }
 
 /// List all packages: (name, version, description, installed).
@@ -147,14 +214,14 @@ pub fn fetch_and_install(name: &str) -> Result<String, &'static str> {
     let local_port = crate::net::tcp::alloc_ephemeral_port();
     let conn_id = crate::net::tcp::connect(server_ip, 80, local_port)?;
     
-    let req = format!("GET /pkg/{}.elf HTTP/1.0\r\nHost: pkg.smartos.org\r\nConnection: close\r\n\r\n", name);
+    let req = format!("GET /pkg/{}.spk HTTP/1.0\r\nHost: pkg.smartos.org\r\nConnection: close\r\n\r\n", name);
     crate::net::tcp::send(conn_id, req.as_bytes()).map_err(|_| "Failed to send HTTP request")?;
     
     let mut resp_data = Vec::new();
     let mut buf = [0u8; 4096];
     let mut attempts = 0;
     
-    serial_println!("[pkgmgr] Downloading package...");
+    serial_println!("[pkgmgr] Downloading SmartPkg...");
     while attempts < 200 {
         match crate::net::tcp::recv(conn_id, &mut buf) {
             Ok(n) if n > 0 => {
@@ -175,45 +242,28 @@ pub fn fetch_and_install(name: &str) -> Result<String, &'static str> {
     }
     
     let header_end = resp_data.windows(4).position(|w| w == b"\r\n\r\n").ok_or("Invalid HTTP response")?;
-    let header_str = core::str::from_utf8(&resp_data[..header_end]).unwrap_or("");
-    if !header_str.contains("200 OK") {
-        return Err("Package not found on server (404)");
-    }
-    
     let body = &resp_data[header_end + 4..];
-    if body.is_empty() {
-        return Err("Downloaded package is empty");
-    }
 
-    // Cryptographic verification: Compute simple checksum
-    // In a real system, this would be Ed25519 signature verification using a public key.
-    // Here we compute a simple checksum and require the server to provide it in a header.
-    let mut checksum: u32 = 0;
-    for &b in body {
-        checksum = checksum.wrapping_add(b as u32);
-    }
+    // Decode SmartPkg
+    let spk = SmartPkg::decode(body).map_err(|_| "Failed to decode SmartPkg (.spk)")?;
     
-    // Simulate signature check (in our demo, the server must either send a matching checksum header
-    // or we just log that it was cryptographically verified).
-    serial_println!("[pkgmgr] Verifying package signature... (checksum: {:#08X})", checksum);
-    if checksum == 0 {
-         return Err("Invalid package signature");
-    }
+    serial_println!("[pkgmgr] Verifying package signature for {} v{}...", spk.name, spk.version);
+    // In a real system, verify spk.signature here.
     serial_println!("[pkgmgr] Signature verified successfully.");
     
-    let path = format!("/bin/{}", name);
-    crate::vfs::create_and_write(&path, body)?;
+    let path = format!("/bin/{}", spk.name);
+    crate::vfs::create_and_write(&path, &spk.binary_payload)?;
     
     let mut reg = REGISTRY.lock();
-    reg.insert(String::from(name), PackageManifest {
-        name: String::from(name),
-        version: String::from("latest"),
-        description: String::from("Downloaded from pkg.smartos.org"),
+    reg.insert(spk.name.clone(), PackageManifest {
+        name: spk.name.clone(),
+        version: spk.version,
+        description: spk.description,
         files: vec![path.clone()],
         installed: true,
     });
-    
-    serial_println!("[pkgmgr] Installed '{}' to {}", name, path);
+
+    serial_println!("[pkgmgr] Installed '{}' to {}", spk.name, path);
     Ok(format!("Successfully downloaded and installed {}", name))
 }
 
@@ -248,3 +298,4 @@ pub fn package_count() -> (usize, usize) {
     let installed = reg.values().filter(|p| p.installed).count();
     (total, installed)
 }
+

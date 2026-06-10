@@ -58,7 +58,7 @@ pub fn send_ping(dest_ip: [u8; 4], seq: u32) -> Result<u64, &'static str> {
     let icmp_pkt = build_echo_request(seq);
 
     // Build IPv4 packet with protocol 1 (ICMP)
-    let src_ip = super::LOCAL_IP;
+    let src_ip = super::local_ip();
     let ip_pkt = super::ipv4::build(src_ip, dest_ip, 1, &icmp_pkt);
 
     // Resolve destination MAC via ARP

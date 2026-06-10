@@ -8,8 +8,16 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use super::{Pid, Tid, ThreadState, alloc_tid};
 
-/// Size of each kernel thread's stack (16 KiB).
-const THREAD_STACK_SIZE: usize = 4096 * 4;
+/// Default kernel thread stack (128 KiB).
+const THREAD_STACK_SIZE: usize = 4096 * 32;
+
+/// Large stack for threads that do deep networking (512 KiB).
+///
+/// The browser thread makes two sequential HTTPS connections per page load
+/// (one for HTML, one per image).  TLS 1.3 alone allocates two 4 KB stack
+/// buffers + dozens of 32-byte crypto arrays; the HTTP client and TCP layer
+/// add more.  128 KiB is too tight; 512 KiB gives ample headroom.
+pub const THREAD_STACK_SIZE_LARGE: usize = 4096 * 128;
 
 /// User-mode code segment selector (GDT index 4, RPL=3).
 pub const USER_CODE_SEL: u64 = (4 << 3) | 3; // 0x23
@@ -40,6 +48,8 @@ pub struct Thread {
     /// CR3 value for this thread's address space.
     /// 0 means use the kernel page table.
     pub cr3: u64,
+    /// Stack canary — random value placed at stack bottom, checked on exit.
+    pub canary: u64,
 }
 
 impl Thread {
@@ -47,9 +57,12 @@ impl Thread {
     pub fn new(name: &str, entry: fn(), priority: u8) -> Self {
         let tid = alloc_tid();
 
-        // Allocate a stack
+        // Allocate a stack. Vec<u8> has 1-byte alignment, so we must align
+        // stack_top down to 16 bytes to satisfy the x86-64 ABI (RSP must be
+        // 16-byte aligned before any `call` instruction).
         let stack = alloc::vec![0u8; THREAD_STACK_SIZE];
-        let stack_top = stack.as_ptr() as u64 + THREAD_STACK_SIZE as u64;
+        let raw_top = stack.as_ptr() as u64 + THREAD_STACK_SIZE as u64;
+        let stack_top = raw_top & !15u64; // align down to 16-byte boundary
 
         // Set up the initial stack frame so that when we "return" to this
         // thread, it starts executing at `entry`.
@@ -71,7 +84,7 @@ impl Thread {
 
         Thread {
             tid,
-            pid: 0, // kernel process
+            pid: 0,
             name: String::from(name),
             state: ThreadState::Ready,
             stack_ptr: initial_sp,
@@ -80,6 +93,41 @@ impl Thread {
             priority,
             is_user: false,
             cr3: 0,
+            canary: gen_canary(tid),
+        }
+    }
+
+    /// Like `new` but allocates a 512 KiB stack for threads that need deep
+    /// network call chains (TLS + HTTP + image decode stacked on top of each
+    /// other can consume > 200 KiB of stack).
+    pub fn new_large(name: &str, entry: fn(), priority: u8) -> Self {
+        let tid = alloc_tid();
+        let stack = alloc::vec![0u8; THREAD_STACK_SIZE_LARGE];
+        let raw_top = stack.as_ptr() as u64 + THREAD_STACK_SIZE_LARGE as u64;
+        let stack_top = raw_top & !15u64;
+        let initial_sp = stack_top - 8 * 7;
+        unsafe {
+            let sp = initial_sp as *mut u64;
+            core::ptr::write(sp.add(0), entry as *const () as u64);
+            core::ptr::write(sp.add(1), 0u64);
+            core::ptr::write(sp.add(2), 0u64);
+            core::ptr::write(sp.add(3), 0u64);
+            core::ptr::write(sp.add(4), 0u64);
+            core::ptr::write(sp.add(5), 0u64);
+            core::ptr::write(sp.add(6), thread_entry_trampoline as *const () as u64);
+        }
+        Thread {
+            tid,
+            pid: 0,
+            name: String::from(name),
+            state: ThreadState::Ready,
+            stack_ptr: initial_sp,
+            kernel_stack_ptr: 0,
+            _stack: Some(stack),
+            priority,
+            is_user: false,
+            cr3: 0,
+            canary: gen_canary(tid),
         }
     }
 
@@ -90,12 +138,13 @@ impl Thread {
             pid: 0,
             name: String::from("kernel_main"),
             state: ThreadState::Running,
-            stack_ptr: 0, // Will be saved on first context switch
+            stack_ptr: 0,
             kernel_stack_ptr: 0,
-            _stack: None,  // Boot thread uses the bootloader-provided stack
+            _stack: None,
             priority: 0,
             is_user: false,
             cr3: 0,
+            canary: 0xCAFEBABEDEAD_0000,
         }
     }
 
@@ -120,7 +169,8 @@ impl Thread {
 
         // Allocate a kernel stack for this thread (used during syscalls/interrupts).
         let kernel_stack = alloc::vec![0u8; THREAD_STACK_SIZE];
-        let kernel_stack_top = kernel_stack.as_ptr() as u64 + THREAD_STACK_SIZE as u64;
+        let raw_top = kernel_stack.as_ptr() as u64 + THREAD_STACK_SIZE as u64;
+        let kernel_stack_top = raw_top & !15u64; // align down to 16-byte boundary
 
         // Set up the full InterruptContext frame on the kernel stack.
         // 20 qwords: 15 GPRs + 5 iretq frame.
@@ -162,8 +212,15 @@ impl Thread {
             priority,
             is_user: true,
             cr3,
+            canary: gen_canary(tid),
         }
     }
+}
+
+pub fn gen_canary(tid: u64) -> u64 {
+    let t = crate::drivers::timer::ticks();
+    // Mix tid + ticks with a constant to get a pseudo-random canary
+    t.wrapping_mul(0x9e3779b97f4a7c15).wrapping_add(tid).wrapping_mul(0x6c62272e07bb0142)
 }
 
 /// Trampoline function that new kernel threads start in.

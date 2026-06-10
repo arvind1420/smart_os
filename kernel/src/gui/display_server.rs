@@ -27,6 +27,8 @@ pub const CMD_REDRAW: u64 = 6;
 pub const CMD_ADD_WIDGET: u64 = 7;
 pub const CMD_HUB_PUBLISH: u64 = 8;
 pub const CMD_HUB_QUERY: u64 = 9;
+pub const CMD_DRAW_TEXT_TTF: u64 = 10;
+pub const CMD_DRAW_IMAGE: u64 = 11;
 
 // ═══════════════════════════════════════════════════════════════
 //  Display event types
@@ -116,6 +118,8 @@ pub fn handle_cmd(pid: u64, cmd: u64, arg1: u64, arg2: u64, arg3: u64, _arg4: u6
         CMD_ADD_WIDGET => add_widget(pid, arg1 as WindowId, arg2, arg3, _arg4),
         CMD_HUB_PUBLISH => hub_publish(pid, arg1, arg2, arg3),
         CMD_HUB_QUERY => hub_query(pid, arg1, arg2, arg3),
+        CMD_DRAW_TEXT_TTF => draw_text_ttf(pid, arg1 as WindowId, arg2, arg3, _arg4),
+        CMD_DRAW_IMAGE => draw_image(pid, arg1 as WindowId, arg2, arg3, _arg4),
         CMD_REDRAW => { /* redraw happens automatically in render loop */ 0 }
         _ => u64::MAX,
     }
@@ -266,6 +270,84 @@ fn draw_text(pid: u64, wid: WindowId, xy_packed: u64, text_ptr: u64, text_len_64
     0
 }
 
+fn draw_text_ttf(pid: u64, wid: WindowId, xy_size_packed: u64, text_ptr: u64, text_len_64: u64) -> u64 {
+    let x = (xy_size_packed >> 32) as usize & 0xFFFF;
+    let y = (xy_size_packed >> 16) as usize & 0xFFFF;
+    let size = (xy_size_packed & 0xFFFF) as usize;
+    let text_len = (text_len_64 as usize).min(256);
+
+    // Verify ownership
+    {
+        let ds = DISPLAY_SERVER.lock();
+        match ds.as_ref().and_then(|d| d.windows.get(&wid)) {
+            Some(info) if info.owner_pid == pid => {}
+            _ => return u64::MAX,
+        }
+    }
+
+    // Read text from user memory
+    let text = unsafe {
+        let ptr = text_ptr as *const u8;
+        if ptr.is_null() || text_ptr >= 0x8000_0000_0000 {
+            return u64::MAX;
+        }
+        let slice = core::slice::from_raw_parts(ptr, text_len);
+        core::str::from_utf8(slice).unwrap_or("")
+    };
+
+    // Store in content_lines with special @ttf prefix
+    let line = format!("@ttf:{}:{}:{} {}", x, y, size, text);
+    let mut desktop = super::desktop::DESKTOP.lock();
+    if let Some(d) = desktop.as_mut() {
+        for w in d.wm.windows.iter_mut() {
+            if w.id == wid {
+                w.content_lines.push(line);
+                w.dirty = true;
+                break;
+            }
+        }
+    }
+    0
+}
+
+fn draw_image(pid: u64, wid: WindowId, xy_packed: u64, wh_packed: u64, pixels_ptr: u64) -> u64 {
+    let x = (xy_packed >> 16) as usize & 0xFFFF;
+    let y = (xy_packed & 0xFFFF) as usize;
+    let w = (wh_packed >> 16) as usize & 0xFFFF;
+    let h = (wh_packed & 0xFFFF) as usize;
+
+    // Verify ownership
+    {
+        let ds = DISPLAY_SERVER.lock();
+        match ds.as_ref().and_then(|d| d.windows.get(&wid)) {
+            Some(info) if info.owner_pid == pid => {}
+            _ => return u64::MAX,
+        }
+    }
+
+    if pixels_ptr >= 0x8000_0000_0000 || w == 0 || h == 0 || w > 800 || h > 600 {
+        return u64::MAX;
+    }
+
+    let pixels_len = w * h * 4;
+    let pixels_bytes = unsafe {
+        let ptr = pixels_ptr as *const u8;
+        if ptr.is_null() {
+            return u64::MAX;
+        }
+        core::slice::from_raw_parts(ptr, pixels_len)
+    };
+
+    let mut desktop = super::desktop::DESKTOP.lock();
+    if let Some(d) = desktop.as_mut() {
+        if let Some(win) = d.wm.get_mut(wid) {
+            win.image_buffer = Some((x, y, w, h, pixels_bytes.to_vec()));
+            win.dirty = true;
+        }
+    }
+    0
+}
+
 fn fill_rect(pid: u64, wid: WindowId, xy_packed: u64, wh_packed: u64, color: u64) -> u64 {
     let _x = (xy_packed >> 16) as usize & 0xFFFF;
     let _y = (xy_packed & 0xFFFF) as usize;
@@ -383,7 +465,7 @@ pub fn poll_event(pid: u64) -> Option<DisplayEvent> {
 }
 
 /// Route a key event to the display server (called from input.rs).
-pub fn route_key_event(wid: WindowId, ascii: u8, scancode: u8) {
+pub fn route_key_event(wid: WindowId, key: char, scancode: u8) {
     let mut ds = DISPLAY_SERVER.lock();
     let ds = match ds.as_mut() {
         Some(d) => d,
@@ -394,7 +476,7 @@ pub fn route_key_event(wid: WindowId, ascii: u8, scancode: u8) {
         let event = DisplayEvent {
             event_type: EVENT_KEY_PRESS,
             window_id: wid as u32,
-            data: [ascii as u32, scancode as u32, 0, 0],
+            data: [key as u32, scancode as u32, 0, 0],
         };
         ds.event_queues.entry(pid).or_insert_with(VecDeque::new).push_back(event);
     }

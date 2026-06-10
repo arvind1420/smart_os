@@ -10,6 +10,8 @@ pub mod font;
 pub mod font_large;
 pub mod theme;
 pub mod compositor;
+pub mod bidi;
+pub mod ime;
 pub mod window;
 pub mod widgets;
 pub mod desktop;
@@ -21,6 +23,7 @@ pub mod clipboard;
 pub mod notification;
 pub mod context_menu;
 pub mod alt_tab;
+pub mod wm2;
 pub mod virtual_desktop;
 pub mod theming;
 pub mod display_server;
@@ -28,6 +31,7 @@ pub mod ipc;
 pub mod xr;
 pub mod wayland;
 pub mod holographic;
+pub mod accessibility;
 
 /// Initialize the GUI subsystem.
 pub fn init(fb_addr: *mut u8, width: usize, height: usize, stride: usize, bpp: usize, is_bgr: bool) {
@@ -36,6 +40,7 @@ pub fn init(fb_addr: *mut u8, width: usize, height: usize, stride: usize, bpp: u
     xr::init();
     wayland::init();
     holographic::init();
+    accessibility::init();
     crate::serial_println!("[gui] GUI compositor initialized ({}x{}).", width, height);
 }
 

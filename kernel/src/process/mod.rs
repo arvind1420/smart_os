@@ -23,6 +23,8 @@ pub mod asm_builder;
 pub mod kmod;
 pub mod pe;
 pub mod migration;
+pub mod dynlink;
+pub mod ptrace;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 

@@ -209,44 +209,96 @@ impl Taskbar {
     ) {
         let bar_y = self.screen_height.saturating_sub(TASKBAR_HEIGHT);
         let bar_h = TASKBAR_HEIGHT;
-
-        // Taskbar background
-        comp.fill_rect(0, bar_y, self.screen_width, bar_h, BG_TASKBAR);
-
-        // Top border (neon accent line)
-        comp.hline(0, bar_y, self.screen_width, ACCENT_CYAN.dim(100));
-
-        // ── OS Logo / Start area ──
-        let logo_x = 6;
+        let icon_size = 32usize;
+        let icon_pad = (bar_h.saturating_sub(icon_size)) / 2;
         let text_y = bar_y + (bar_h.saturating_sub(16)) / 2;
-        comp.draw_text(logo_x, text_y, "SMART", ACCENT_CYAN);
-        comp.draw_text(logo_x + 44, text_y, "OS", ACCENT_MAGENTA);
 
-        // Separator
-        let sep_x = logo_x + 68;
-        comp.vline(sep_x, bar_y + 4, bar_h - 8, BORDER_INACTIVE);
+        // ── Taskbar background (frosted dark) ──
+        comp.fill_rect(0, bar_y, self.screen_width, bar_h, BG_TASKBAR);
+        // Subtle top separator
+        comp.hline(0, bar_y, self.screen_width, BORDER_INACTIVE);
 
-        // ── Window buttons ──
-        let mut btn_x = sep_x + 8;
+        // ── Start Button (left side) ──
+        let start_w = 48usize;
+        let start_x = 4usize;
+        let start_icon_x = start_x + (start_w - icon_size) / 2;
+        let start_icon_y = bar_y + icon_pad;
+        // Draw 4-quadrant Windows-like logo
+        let q = icon_size / 2 - 1;
+        comp.fill_rect(start_icon_x,     start_icon_y,     q, q, ACCENT_BLUE);
+        comp.fill_rect(start_icon_x + q + 2, start_icon_y, q, q, ACCENT_GREEN.dim(200));
+        comp.fill_rect(start_icon_x,     start_icon_y + q + 2, q, q, ACCENT_ORANGE.dim(200));
+        comp.fill_rect(start_icon_x + q + 2, start_icon_y + q + 2, q, q, ACCENT_RED.dim(200));
+
+        // ── Search bar (next to Start) ──
+        let search_x = start_x + start_w + 6;
+        let search_w = 160usize;
+        let search_y = bar_y + icon_pad;
+        let search_h = icon_size;
+        comp.fill_rect(search_x, search_y, search_w, search_h, BG_SECONDARY);
+        comp.draw_rect(search_x, search_y, search_w, search_h, BORDER_INACTIVE);
+        comp.draw_text(search_x + 6, search_y + (search_h.saturating_sub(16)) / 2,
+            "Search...", TEXT_MUTED);
+
+        // ── Center: Running app buttons ──
+        let apps_area_start = search_x + search_w + 8;
+        let apps_area_end = self.screen_width.saturating_sub(200);
+        let mut btn_x = apps_area_start;
+
         for &(_, title, active, accent) in window_list {
-            let btn_w = title.len() * 8 + 16;
+            let btn_w = (title.len() * 7 + 20).min(120);
+            if btn_x + btn_w > apps_area_end { break; }
+
+            let btn_y = bar_y + icon_pad;
+            let btn_h = icon_size;
+
             if active {
-                // Active window button — highlighted
-                comp.fill_rect(btn_x, bar_y + 2, btn_w, bar_h - 4, accent.dim(40));
-                comp.hline(btn_x, bar_y + 2, btn_w, accent);
-                comp.draw_text(btn_x + 8, text_y, title, accent);
+                // Active: filled with accent tint + bottom accent bar
+                comp.fill_rect(btn_x, btn_y, btn_w, btn_h, accent.dim(35));
+                comp.draw_rect(btn_x, btn_y, btn_w, btn_h, accent.dim(80));
+                // Bottom accent bar
+                comp.hline(btn_x, bar_y + bar_h - 3, btn_w, accent);
+                comp.hline(btn_x, bar_y + bar_h - 4, btn_w, accent.dim(140));
+                comp.draw_text(btn_x + 8, btn_y + (btn_h.saturating_sub(16)) / 2, title, TEXT_PRIMARY);
             } else {
-                comp.draw_text(btn_x + 8, text_y, title, TEXT_SECONDARY);
+                // Inactive: subtle border on hover (static: just dim text)
+                comp.fill_rect(btn_x, btn_y, btn_w, btn_h, BG_SECONDARY);
+                comp.draw_rect(btn_x, btn_y, btn_w, btn_h, BORDER_INACTIVE);
+                // Dim dot indicator (window exists but not active)
+                comp.fill_rect(btn_x + btn_w / 2 - 2, bar_y + bar_h - 4, 4, 2, TEXT_MUTED);
+                comp.draw_text(btn_x + 8, btn_y + (btn_h.saturating_sub(16)) / 2, title, TEXT_SECONDARY);
             }
             btn_x += btn_w + 4;
         }
 
-        // ── Clock (right side) — real RTC time ──
+        // ── System Tray (right side) ──
+        let tray_right = self.screen_width.saturating_sub(4);
+
+        // Clock + date
         let dt = crate::drivers::rtc::now();
-        let clock_str = format!("{:02}:{:02}:{:02}", dt.hour, dt.minute, dt.second);
+        let clock_str = format!("{:02}:{:02}", dt.hour, dt.minute);
+        let date_str = format!("{:04}-{:02}-{:02}", dt.year, dt.month, dt.day);
         let clock_w = clock_str.len() * 8;
-        let clock_x = self.screen_width.saturating_sub(clock_w + 10);
-        comp.draw_text(clock_x, text_y, &clock_str, ACCENT_GREEN);
+        let date_w = date_str.len() * 8;
+        let tray_w = clock_w.max(date_w) + 16;
+        let tray_x = tray_right.saturating_sub(tray_w);
+
+        comp.draw_text(tray_x + 8, bar_y + 6, &clock_str, TEXT_PRIMARY);
+        comp.draw_text(tray_x + 8, bar_y + 24, &date_str, TEXT_SECONDARY);
+
+        // Tray separator
+        comp.vline(tray_x - 6, bar_y + 8, bar_h - 16, BORDER_INACTIVE);
+
+        // Network/notification indicator (just a colored dot)
+        let notif_x = tray_x.saturating_sub(20);
+        comp.fill_rect(notif_x, bar_y + icon_pad + 8, 8, 8, ACCENT_BLUE.dim(180));
+
+        // Status dot (uptime-based color: green=ok)
+        let status_x = notif_x.saturating_sub(16);
+        comp.fill_rect(status_x, bar_y + icon_pad + 8, 8, 8, ACCENT_GREEN.dim(180));
+
+        // Frame/thread info (dev overlay — small, muted)
+        let _ = text_y;
     }
 }
 

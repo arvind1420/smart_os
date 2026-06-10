@@ -134,6 +134,34 @@ fn handle_line_click(state: &mut FileManagerState, line_idx: usize) {
                 state.entries = load_directory(&full_path);
                 state.preview_lines = vec![(String::from("  Select a file to preview"), TEXT_MUTED)];
             } else {
+                // Check if it is an image file
+                let lower = entry_name.to_ascii_lowercase();
+                if lower.ends_with(".png") || lower.ends_with(".jpg") || lower.ends_with(".jpeg") || lower.ends_with(".bmp") || lower.ends_with(".webp") || lower.ends_with(".heic") || lower.ends_with(".raw") {
+                    // Write full path to /tmp/last_image.txt
+                    let _ = crate::vfs::create_and_write("/tmp/last_image.txt", full_path.as_bytes());
+                    // Spawn user-space image viewer
+                    let _ = crate::process::scheduler::spawn_user_process("image_viewer", "/bin/image_viewer");
+                } else if lower.ends_with(".pdf") {
+                    // Write full path to /tmp/last_pdf.txt
+                    let _ = crate::vfs::create_and_write("/tmp/last_pdf.txt", full_path.as_bytes());
+                    // Spawn user-space PDF reader
+                    let _ = crate::process::scheduler::spawn_user_process("pdf_reader", "/bin/pdf_reader");
+                } else if lower.ends_with(".mp4") || lower.ends_with(".avi") || lower.ends_with(".mkv") || lower.ends_with(".mov") {
+                    // Write full path to /tmp/last_video.txt
+                    let _ = crate::vfs::create_and_write("/tmp/last_video.txt", full_path.as_bytes());
+                    // Spawn user-space video player
+                    let _ = crate::process::scheduler::spawn_user_process("video_player", "/bin/video_player");
+                } else if lower.ends_with(".eml") {
+                    // Write full path to /tmp/last_email.txt
+                    let _ = crate::vfs::create_and_write("/tmp/last_email.txt", full_path.as_bytes());
+                    // Spawn user-space email client
+                    let _ = crate::process::scheduler::spawn_user_process("email_client", "/bin/email_client");
+                } else if lower.ends_with(".docx") {
+                    // Write full path to /tmp/last_doc.txt
+                    let _ = crate::vfs::create_and_write("/tmp/last_doc.txt", full_path.as_bytes());
+                    // Spawn user-space office app
+                    let _ = crate::process::scheduler::spawn_user_process("office", "/bin/office");
+                }
                 // Preview the file
                 state.preview_lines = load_file_preview(&full_path);
             }
@@ -196,6 +224,8 @@ fn file_icon(name: &str) -> (&'static str, Color) {
         "txt" | "md" | "log" => ("[T]", ACCENT_GREEN),
         "json" | "toml" | "yaml" | "yml" | "cfg" | "sp" => ("[C]", ACCENT_ORANGE),
         "png" | "jpg" | "bmp" | "gif" => ("[I]", ACCENT_PURPLE),
+        "eml" => ("[E]", ACCENT_ORANGE),
+        "docx" => ("[W]", ACCENT_CYAN),
         "zip" | "tar" | "gz" => ("[A]", ACCENT_BLUE),
         "bin" | "elf" | "exe" => ("[B]", ACCENT_RED),
         _ => ("[?]", TEXT_MUTED),

@@ -1,0 +1,12 @@
+ Feature                │ Smart OS (The "Newcomer" Struggle)                                                         │ Windows (The "Titan" Advantage)                                                      │
+  ├────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────┤
+  │ Hardware Support   │ Highly Specific. Currently runs great on Intel iGPUs, e1000 NICs, and NVMe. No support │ Universal. Windows runs on literally billions of hardware combinations perfectly │
+  │                        │ for Wi-Fi, Bluetooth, or Printers yet.                                                     │ out of the box.                                                                      │
+  │ App Ecosystem      │ Empty. We only have the Shell, Dashboard, and SDK demos. No Web Browser, no Office, no │ Infinite. 30 years of Win32, .NET, and UWP applications. Every piece of software │
+  │                        │ Games.                                                                                     │ on earth is built for Windows first.                                                 │
+  │ Legacy Support     │ None. You cannot run a 32-bit program or an old .exe. It's ELF64 or nothing.         │ Perfect. You can still run many 16-bit or 32-bit applications from the early     │
+  │                        │                                                                                            │ 2000s via WoW64.                                                                     │
+  │ Enterprise Tooling │ Basic. No Active Directory, no complex Group Policies, no BitLocker-grade disk         │ The Industry Standard. Windows is the backbone of global corporate               │
+  │                        │ encryption yet.                                                                            │ infrastructure.                                                                      │
+  │ Documentation/Help │ Internal Book Only. If the OS panics, only you (and I) know why.                       │ Global Community. Decades of StackOverflow and Microsoft Support pages for every │
+  │                        │                                                                                            │ possible error code.

@@ -66,6 +66,8 @@ pub struct Window {
 
     /// Saved bounds before snapping/maximizing (x, y, w, h).
     pub pre_snap_bounds: Option<(usize, usize, usize, usize)>,
+    /// Raw image pixel buffer: (x, y, w, h, pixels)
+    pub image_buffer: Option<(usize, usize, usize, usize, Vec<u8>)>,
 }
 
 impl Window {
@@ -100,6 +102,7 @@ impl Window {
             focused_widget: None,
             use_widgets: false,
             pre_snap_bounds: None,
+            image_buffer: None,
             hardware_fb,
             dirty: true,
         }
@@ -127,6 +130,27 @@ impl Window {
         self.width + BORDER_WIDTH * 2
     }
 
+    /// Resize the window content area, handling hardware framebuffer allocation if needed.
+    pub fn resize(&mut self, new_width: usize, new_height: usize) {
+        if self.width == new_width && self.height == new_height {
+            return;
+        }
+        self.width = new_width;
+        self.height = new_height;
+        self.dirty = true;
+
+        if self.hardware_fb.is_some() {
+            let mut drm = crate::drivers::drm::DRM.lock();
+            if let Some(ref mut driver) = drm.active_driver {
+                let tw = new_width + BORDER_WIDTH * 2;
+                let th = new_height + TITLEBAR_HEIGHT + BORDER_WIDTH * 2;
+                if let Ok(fb) = driver.alloc_framebuffer(tw as u32, th as u32, 0) {
+                    self.hardware_fb = Some(fb);
+                }
+            }
+        }
+    }
+
     /// Maximize the window to fill the screen (saves current bounds for restore).
     pub fn maximize(&mut self, screen_w: usize, screen_h: usize) {
         if self.state != WindowState::Maximized {
@@ -134,8 +158,9 @@ impl Window {
         }
         self.x = 0;
         self.y = 0;
-        self.width = screen_w.saturating_sub(BORDER_WIDTH * 2);
-        self.height = screen_h.saturating_sub(TITLEBAR_HEIGHT + BORDER_WIDTH * 2 + TASKBAR_HEIGHT);
+        let new_w = screen_w.saturating_sub(BORDER_WIDTH * 2);
+        let new_h = screen_h.saturating_sub(TITLEBAR_HEIGHT + BORDER_WIDTH * 2 + TASKBAR_HEIGHT);
+        self.resize(new_w, new_h);
         self.state = WindowState::Maximized;
     }
 
@@ -144,8 +169,7 @@ impl Window {
         if let Some((x, y, w, h)) = self.pre_snap_bounds.take() {
             self.x = x;
             self.y = y;
-            self.width = w;
-            self.height = h;
+            self.resize(w, h);
         }
         self.state = WindowState::Normal;
         self.visible = true;
@@ -158,8 +182,9 @@ impl Window {
         }
         self.x = x;
         self.y = y;
-        self.width = w.saturating_sub(BORDER_WIDTH * 2);
-        self.height = h.saturating_sub(TITLEBAR_HEIGHT + BORDER_WIDTH * 2);
+        let new_w = w.saturating_sub(BORDER_WIDTH * 2);
+        let new_h = h.saturating_sub(TITLEBAR_HEIGHT + BORDER_WIDTH * 2);
+        self.resize(new_w, new_h);
         self.state = WindowState::Normal; // Snapped is rendered as Normal
     }
 
@@ -191,37 +216,71 @@ impl Window {
         let new_focus = focusable[next_idx];
 
         // Update focus states
+        let mut new_label = alloc::string::String::new();
+        let mut new_role = super::accessibility::UIRole::Unknown;
+
         for w in &mut self.widgets {
             let was_focused = w.focused;
             w.focused = w.id == new_focus;
-            if was_focused && !w.focused {
-                w.handle_event(&WidgetEvent::FocusLost);
-            } else if !was_focused && w.focused {
+            if !was_focused && w.focused {
+                // Focus Gained
+                new_label = match &w.kind {
+                    super::widget::WidgetKind::Button(b) => b.label.clone(),
+                    super::widget::WidgetKind::TextInput(t) => t.placeholder.clone(),
+                    _ => alloc::format!("Widget {}", w.id),
+                };
+                new_role = match &w.kind {
+                    super::widget::WidgetKind::Button(_) => super::accessibility::UIRole::Button,
+                    super::widget::WidgetKind::TextInput(_) => super::accessibility::UIRole::TextInput,
+                    _ => super::accessibility::UIRole::Unknown,
+                };
                 w.handle_event(&WidgetEvent::FocusGained);
+            } else if was_focused && !w.focused {
+                w.handle_event(&WidgetEvent::FocusLost);
             }
         }
         self.focused_widget = Some(new_focus);
+
+        // Notify A-Bus (Phase 43)
+        super::accessibility::on_focus_changed(new_role, &new_label);
     }
 
     /// Set focus to a specific widget by ID.
     pub fn focus_widget(&mut self, id: u8) {
+        let mut new_label = alloc::string::String::new();
+        let mut new_role = super::accessibility::UIRole::Unknown;
+
         for w in &mut self.widgets {
             let was_focused = w.focused;
             w.focused = w.id == id;
-            if was_focused && !w.focused {
-                w.handle_event(&WidgetEvent::FocusLost);
-            } else if !was_focused && w.focused {
+            if !was_focused && w.focused {
+                // Focus Gained
+                new_label = match &w.kind {
+                    super::widget::WidgetKind::Button(b) => b.label.clone(),
+                    super::widget::WidgetKind::TextInput(t) => t.placeholder.clone(),
+                    _ => alloc::format!("Widget {}", w.id),
+                };
+                new_role = match &w.kind {
+                    super::widget::WidgetKind::Button(_) => super::accessibility::UIRole::Button,
+                    super::widget::WidgetKind::TextInput(_) => super::accessibility::UIRole::TextInput,
+                    _ => super::accessibility::UIRole::Unknown,
+                };
                 w.handle_event(&WidgetEvent::FocusGained);
+            } else if was_focused && !w.focused {
+                w.handle_event(&WidgetEvent::FocusLost);
             }
         }
         self.focused_widget = Some(id);
+
+        // Notify A-Bus (Phase 43)
+        super::accessibility::on_focus_changed(new_role, &new_label);
     }
 
     /// Route a key press to the focused widget.
-    pub fn dispatch_key(&mut self, ascii: u8, scancode: u8) -> Option<WidgetAction> {
+    pub fn dispatch_key(&mut self, key: char, scancode: u8) -> Option<WidgetAction> {
         let focus_id = self.focused_widget?;
         let widget = self.widgets.iter_mut().find(|w| w.id == focus_id)?;
-        let action = widget.handle_event(&WidgetEvent::KeyPress { ascii, scancode });
+        let action = widget.handle_event(&WidgetEvent::KeyPress { key, scancode });
         match action {
             WidgetAction::None => None,
             other => Some(other),
@@ -263,6 +322,19 @@ impl Window {
     pub fn render(&mut self, comp: &mut Compositor) {
         if !self.visible || self.state == WindowState::Minimized {
             return;
+        }
+
+        // Draw soft drop shadow first (only if NOT maximized!)
+        if self.state != WindowState::Maximized {
+            let tw = self.total_width();
+            let th = self.total_height();
+            if self.active {
+                // Active window shadow: offset = 6, blur = 10, max_alpha = 140
+                comp.draw_soft_shadow(self.x, self.y, tw, th, 6, 6, 10, 140);
+            } else {
+                // Inactive window shadow: offset = 3, blur = 5, max_alpha = 80
+                comp.draw_soft_shadow(self.x, self.y, tw, th, 3, 3, 5, 80);
+            }
         }
 
         // Hardware Acceleration Path: Render to window's own FB then blit to screen
@@ -309,23 +381,44 @@ impl Window {
         let tb_w = self.width;
         comp.fill_rect(tb_x, tb_y, tb_w, TITLEBAR_HEIGHT, titlebar_bg);
 
-        // ── Title bar accent line ──
-        comp.hline(tb_x, tb_y, tb_w, self.accent.dim(if self.active { 255 } else { 80 }));
+        // ── Accent line at very top of title bar (1px) ──
+        if self.active {
+            comp.hline(tb_x, tb_y, tb_w, self.accent.dim(180));
+        }
 
-        // ── Window title text ──
-        let title_x = tb_x + 8;
+        // ── Colored dot + window title ──
+        let dot_x = tb_x + 6;
         let title_y = tb_y + (TITLEBAR_HEIGHT.saturating_sub(16)) / 2;
+        comp.fill_rect(dot_x, title_y + 4, 8, 8, self.accent.dim(if self.active { 200 } else { 80 }));
+        let title_x = dot_x + 12;
         let title_color = if self.active { TEXT_PRIMARY } else { TEXT_SECONDARY };
         comp.draw_text(title_x, title_y, &self.title, title_color);
 
-        // ── Buttons ──
-        let close_x = tb_x + tb_w - 16;
-        let close_y = tb_y + (TITLEBAR_HEIGHT.saturating_sub(8)) / 2;
-        comp.fill_rect(close_x, close_y, 8, 8, ACCENT_RED);
-        let min_x = close_x - 14;
-        comp.fill_rect(min_x, close_y, 8, 8, ACCENT_ORANGE);
-        let max_x = min_x - 14;
-        comp.fill_rect(max_x, close_y, 8, 8, ACCENT_GREEN);
+        // ── Window control buttons (right-aligned, modern style) ──
+        // Button width 40px each: close, maximize, minimize
+        let btn_h = TITLEBAR_HEIGHT;
+        let btn_w = 40usize;
+        let btn_y = tb_y;
+
+        // Close button (rightmost) — red on hover, subtle otherwise
+        let close_x = tb_x + tb_w.saturating_sub(btn_w);
+        comp.fill_rect(close_x, btn_y, btn_w, btn_h, ACCENT_RED.dim(if self.active { 200 } else { 60 }));
+        // Draw × symbol
+        let cx = close_x + btn_w / 2 - 4;
+        let cy = btn_y + btn_h / 2 - 4;
+        comp.draw_text(cx, cy, "x", TEXT_PRIMARY);
+
+        // Maximize button
+        let max_x = close_x.saturating_sub(btn_w);
+        comp.fill_rect(max_x, btn_y, btn_w, btn_h, BG_TITLEBAR_ACTIVE.dim(if self.active { 180 } else { 80 }));
+        let mx = max_x + btn_w / 2 - 4;
+        comp.draw_rect(mx, btn_y + btn_h / 2 - 4, 9, 8, if self.active { TEXT_PRIMARY } else { TEXT_SECONDARY });
+
+        // Minimize button
+        let min_x = max_x.saturating_sub(btn_w);
+        comp.fill_rect(min_x, btn_y, btn_w, btn_h, BG_TITLEBAR_ACTIVE.dim(if self.active { 180 } else { 80 }));
+        let mnx = min_x + btn_w / 2 - 4;
+        comp.hline(mnx, btn_y + btn_h / 2 + 2, 9, if self.active { TEXT_PRIMARY } else { TEXT_SECONDARY });
 
         // ── Content area background ──
         let content_x = tb_x;
@@ -338,7 +431,46 @@ impl Window {
         // ── Render content ──
         if self.use_widgets {
             self.render_widgets(comp, content_x, content_y);
+            // Also blit image_buffer overlay (e.g. image viewer canvas below toolbar)
+            if let Some((ix, iy, img_w, img_h, ref img_pixels)) = self.image_buffer {
+                let max_h = self.height.saturating_sub(iy);
+                let max_w = self.width.saturating_sub(ix);
+                let draw_h = img_h.min(max_h);
+                let draw_w = img_w.min(max_w);
+                for py in 0..draw_h {
+                    let dest_y = content_y + iy + py;
+                    for px in 0..draw_w {
+                        let dest_x = content_x + ix + px;
+                        let off = (py * img_w + px) * 4;
+                        if off + 3 < img_pixels.len() {
+                            let r = img_pixels[off];
+                            let g = img_pixels[off+1];
+                            let b = img_pixels[off+2];
+                            comp.set_pixel(dest_x, dest_y, Color { r, g, b });
+                        }
+                    }
+                }
+            }
         } else {
+            if let Some((ix, iy, img_w, img_h, ref img_pixels)) = self.image_buffer {
+                let max_h = self.height.saturating_sub(iy);
+                let max_w = self.width.saturating_sub(ix);
+                let draw_h = img_h.min(max_h);
+                let draw_w = img_w.min(max_w);
+                for py in 0..draw_h {
+                    let dest_y = content_y + iy + py;
+                    for px in 0..draw_w {
+                        let dest_x = content_x + ix + px;
+                        let off = (py * img_w + px) * 4;
+                        if off + 3 < img_pixels.len() {
+                            let r = img_pixels[off];
+                            let g = img_pixels[off+1];
+                            let b = img_pixels[off+2];
+                            comp.set_pixel(dest_x, dest_y, Color { r, g, b });
+                        }
+                    }
+                }
+            }
             self.render_content_lines(comp, content_x, content_y);
         }
 
@@ -358,6 +490,19 @@ impl Window {
         let max_lines = (self.height.saturating_sub(8)) / 18;
         
         for (i, line) in self.content_lines.iter().enumerate() {
+            if line.starts_with("@ttf:") {
+                let s = &line[5..];
+                if let Some(pos) = s.find(' ') {
+                    let meta = &s[..pos];
+                    let mut parts = meta.split(':');
+                    let rx: usize = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+                    let ry: usize = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+                    let size: usize = parts.next().and_then(|p| p.parse().ok()).unwrap_or(14);
+                    let text = &s[pos+1..];
+                    comp.draw_text_ttf(content_x + rx, content_y + ry, text, TEXT_PRIMARY, size as f32);
+                }
+                continue;
+            }
             if line.starts_with('@') {
                 // Format: @x:y text
                 if let Some(pos) = line.find(' ') {
@@ -372,7 +517,29 @@ impl Window {
             }
             if line.starts_with("!rect") {
                 // Format: !rect x:y wxh #rrggbb
-                // (Simplified parsing for demo)
+                let s = &line[6..];
+                if let Some(space1) = s.find(' ') {
+                    let coords = &s[..space1];
+                    let rest = &s[space1 + 1..];
+                    if let Some(colon) = coords.find(':') {
+                        let rx: usize = coords[..colon].parse().unwrap_or(0);
+                        let ry: usize = coords[colon+1..].parse().unwrap_or(0);
+                        if let Some(space2) = rest.find(' ') {
+                            let dims = &rest[..space2];
+                            let col_str = &rest[space2 + 1..];
+                            if let Some(cross) = dims.find('x') {
+                                let rw: usize = dims[..cross].parse().unwrap_or(0);
+                                let rh: usize = dims[cross+1..].parse().unwrap_or(0);
+                                if col_str.starts_with('#') && col_str.len() == 7 {
+                                    let r = u8::from_str_radix(&col_str[1..3], 16).unwrap_or(0);
+                                    let g = u8::from_str_radix(&col_str[3..5], 16).unwrap_or(0);
+                                    let b = u8::from_str_radix(&col_str[5..7], 16).unwrap_or(0);
+                                    comp.fill_rect(content_x + rx, content_y + ry, rw, rh, Color { r, g, b });
+                                }
+                            }
+                        }
+                    }
+                }
                 continue;
             }
 
@@ -464,6 +631,23 @@ impl WindowManager {
         if let Some(win) = self.get_mut(id) {
             win.visible = false;
             win.active = false;
+        }
+    }
+
+    /// Automatically focus the topmost visible, non-minimized window.
+    pub fn auto_focus_next(&mut self) {
+        let next_active = self.windows.iter()
+            .rev()
+            .find(|w| w.visible && w.state != WindowState::Minimized)
+            .map(|w| w.id);
+
+        if let Some(id) = next_active {
+            self.set_active(id);
+        } else {
+            // Deactivate all if none found
+            for win in &mut self.windows {
+                win.active = false;
+            }
         }
     }
 }

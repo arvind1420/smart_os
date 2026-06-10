@@ -9,7 +9,7 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
-use super::{ethernet, arp, ipv4, LOCAL_IP, GATEWAY_IP, SUBNET_MASK, BROADCAST_MAC};
+use super::{ethernet, arp, ipv4, BROADCAST_MAC};
 
 // ═══════════════════════════════════════════════════════════════
 //  Constants
@@ -245,6 +245,12 @@ pub fn init() {
 
 /// Open a TCP connection (active open, sends SYN).
 pub fn connect(remote_ip: [u8; 4], remote_port: u16, local_port: u16) -> Result<TcpSocketId, &'static str> {
+    crate::serial_println!(
+        "[tcp] connect → {}.{}.{}.{}:{} (local:{})",
+        remote_ip[0], remote_ip[1], remote_ip[2], remote_ip[3],
+        remote_port, local_port
+    );
+
     let sock_id = alloc_socket_id();
     let isn = generate_isn();
 
@@ -488,6 +494,12 @@ fn process_segment(
                 tcb.state = TcpState::Established;
                 tcb.retransmit_seg.clear();
                 tcb.retransmit_count = 0;
+
+                crate::serial_println!(
+                    "[tcp] ESTABLISHED {}.{}.{}.{}:{}",
+                    tcb.remote_ip[0], tcb.remote_ip[1], tcb.remote_ip[2], tcb.remote_ip[3],
+                    tcb.remote_port
+                );
 
                 // Send ACK
                 send_tcp_raw(
@@ -741,8 +753,9 @@ fn send_tcp_raw(
     payload: &[u8],
     dst_ip: [u8; 4],
 ) {
-    let segment = build_segment(src_port, dst_port, seq, ack, flags, window, payload, LOCAL_IP, dst_ip);
-    let ip_packet = ipv4::build(LOCAL_IP, dst_ip, ipv4::PROTO_TCP, &segment);
+    let lip = super::local_ip();
+    let segment = build_segment(src_port, dst_port, seq, ack, flags, window, payload, lip, dst_ip);
+    let ip_packet = ipv4::build(lip, dst_ip, ipv4::PROTO_TCP, &segment);
 
     let our_mac = match crate::net::mac_address() {
         Some(m) => m,
@@ -752,7 +765,7 @@ fn send_tcp_raw(
     let dst_mac = if is_local(dst_ip) {
         resolve_or_broadcast(dst_ip)
     } else {
-        resolve_or_broadcast(GATEWAY_IP)
+        resolve_or_broadcast(super::gateway_ip())
     };
 
     let frame = ethernet::build(dst_mac, our_mac, ethernet::ETHERTYPE_IPV4, &ip_packet);
@@ -761,10 +774,10 @@ fn send_tcp_raw(
 
 /// Check if an IP is on the local subnet.
 fn is_local(ip: [u8; 4]) -> bool {
+    let local = super::local_ip();
+    let mask  = super::subnet_mask();
     for i in 0..4 {
-        if (ip[i] & SUBNET_MASK[i]) != (LOCAL_IP[i] & SUBNET_MASK[i]) {
-            return false;
-        }
+        if (ip[i] & mask[i]) != (local[i] & mask[i]) { return false; }
     }
     true
 }
@@ -816,4 +829,21 @@ pub fn listener_count() -> usize {
 pub fn has_recv_data(conn_id: TcpSocketId) -> bool {
     let conns = TCP_CONNECTIONS.lock();
     conns.get(&conn_id).map(|tcb| !tcb.recv_buf.is_empty()).unwrap_or(false)
+}
+
+/// Returns true if the connection has reached ESTABLISHED state.
+pub fn is_established(sock_id: TcpSocketId) -> bool {
+    TCP_CONNECTIONS.lock()
+        .get(&sock_id)
+        .map(|tcb| tcb.state == TcpState::Established)
+        .unwrap_or(false)
+}
+
+/// Returns true if the connection is closed/removed (connect failed or peer reset).
+pub fn is_gone(sock_id: TcpSocketId) -> bool {
+    let conns = TCP_CONNECTIONS.lock();
+    match conns.get(&sock_id) {
+        None => true,
+        Some(tcb) => tcb.state == TcpState::Closed,
+    }
 }

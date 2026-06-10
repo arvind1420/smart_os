@@ -13,6 +13,15 @@ pub const HID_SUBCLASS_BOOT: u8 = 0x01;
 pub const HID_PROTOCOL_KEYBOARD: u8 = 0x01;
 pub const HID_PROTOCOL_MOUSE: u8 = 0x02;
 
+/// Gamepad state (XInput style).
+#[derive(Clone, Copy, Default)]
+pub struct GamepadReport {
+    pub lx: i8, pub ly: i8,
+    pub rx: i8, pub ry: i8,
+    pub buttons: u16,
+    pub lt: u8, pub rt: u8,
+}
+
 // ═══════════════════════════════════════════════════════════════
 //  HID Reports
 // ═══════════════════════════════════════════════════════════════
@@ -118,6 +127,12 @@ static HID_TO_SCANCODE: [u8; 128] = {
 static KEYBOARD_SLOTS: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 /// Slots that have HID mouse devices.
 static MOUSE_SLOTS: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+/// Slots for HID gamepads.
+static GAMEPAD_SLOTS: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+/// Current state of the primary gamepad.
+pub static PRIMARY_GAMEPAD: Mutex<GamepadReport> = Mutex::new(GamepadReport {
+    lx: 0, ly: 0, rx: 0, ry: 0, buttons: 0, lt: 0, rt: 0,
+});
 /// Previous keyboard report (for detecting key changes).
 static PREV_KB_REPORT: Mutex<KeyboardReport> = Mutex::new(KeyboardReport {
     modifiers: 0, reserved: 0, keycodes: [0; 6],
@@ -139,6 +154,7 @@ pub fn init_hid_from_xhci() {
 
     let mut kb_slots = KEYBOARD_SLOTS.lock();
     let mut ms_slots = MOUSE_SLOTS.lock();
+    let mut gp_slots = GAMEPAD_SLOTS.lock();
 
     for dev in &controller.devices {
         if dev.is_hid_keyboard {
@@ -155,13 +171,21 @@ pub fn init_hid_from_xhci() {
                 dev.slot_id, dev.vendor_id, dev.product_id
             );
         }
+        // Simplified detection for Gamepads (using product IDs or interface class)
+        if dev.vendor_id == 0x045E || dev.vendor_id == 0x054C { // Microsoft or Sony
+             gp_slots.push(dev.slot_id);
+             crate::serial_println!(
+                "[usb-hid] Gamepad detected: slot={}, vendor={:#06X}",
+                dev.slot_id, dev.vendor_id
+            );
+        }
     }
 
-    if !kb_slots.is_empty() || !ms_slots.is_empty() {
+    if !kb_slots.is_empty() || !ms_slots.is_empty() || !gp_slots.is_empty() {
         HID_ACTIVE.store(true, Ordering::Relaxed);
         crate::serial_println!(
-            "[usb-hid] Initialized: {} keyboard(s), {} mouse/mice",
-            kb_slots.len(), ms_slots.len()
+            "[usb-hid] Initialized: {} keyboard(s), {} mouse/mice, {} gamepad(s)",
+            kb_slots.len(), ms_slots.len(), gp_slots.len()
         );
     } else {
         crate::serial_println!("[usb-hid] No HID devices found.");
@@ -287,4 +311,9 @@ pub fn keyboard_count() -> usize {
 /// Get count of HID mice.
 pub fn mouse_count() -> usize {
     MOUSE_SLOTS.lock().len()
+}
+
+/// Get count of HID gamepads.
+pub fn gamepad_count() -> usize {
+    GAMEPAD_SLOTS.lock().len()
 }

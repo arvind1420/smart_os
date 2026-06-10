@@ -150,8 +150,10 @@ pub fn classify_file_content(data: &[u8]) -> Result<InferenceResult, &'static st
 ///   [16..24]: Statistical features (entropy-like, mean, variance proxy, etc.)
 ///   [24..32]: Byte frequency peaks (most common byte ranges)
 pub fn extract_file_features(data: &[u8]) -> Tensor {
-    let len = data.len().max(1);
-    let sample = &data[..len.min(512)]; // Use first 512 bytes
+    if data.is_empty() {
+        return Tensor::from_vec(alloc::vec![0i8; 32], 0.01, 0);
+    }
+    let sample = &data[..data.len().min(512)]; // Use first 512 bytes
 
     // Byte frequency count
     let mut freq = [0u32; 256];

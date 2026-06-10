@@ -161,9 +161,9 @@ pub fn init() {
 pub fn set_screen_bounds(width: usize, height: usize) {
     SCREEN_W.store(width, Ordering::Relaxed);
     SCREEN_H.store(height, Ordering::Relaxed);
-    // Center the cursor
-    MOUSE_X.store((width / 2) as i32, Ordering::Relaxed);
-    MOUSE_Y.store((height / 2) as i32, Ordering::Relaxed);
+    // Start cursor in upper-left quadrant so full screen is reachable
+    MOUSE_X.store((width / 4) as i32, Ordering::Relaxed);
+    MOUSE_Y.store((height / 4) as i32, Ordering::Relaxed);
 }
 
 /// Called from IRQ12 interrupt handler. Assembles 3-byte packets.
@@ -202,8 +202,9 @@ pub fn handle_packet() {
 
         let old_x = MOUSE_X.load(Ordering::Relaxed);
         let old_y = MOUSE_Y.load(Ordering::Relaxed);
-        let new_x = (old_x + dx as i32).clamp(0, sw.saturating_sub(1));
-        let new_y = (old_y - dy as i32).clamp(0, sh.saturating_sub(1)); // Inverted Y
+        // 2× sensitivity so the cursor can reach all edges without large mouse travel
+        let new_x = (old_x + dx as i32 * 2).clamp(0, sw.saturating_sub(1));
+        let new_y = (old_y - dy as i32 * 2).clamp(0, sh.saturating_sub(1)); // Inverted Y
         MOUSE_X.store(new_x, Ordering::Relaxed);
         MOUSE_Y.store(new_y, Ordering::Relaxed);
 
@@ -217,6 +218,20 @@ pub fn handle_packet() {
         EVENTS.lock().push(event);
 
         pkt.index = 0;
+    }
+}
+
+/// Poll the PS/2 controller for mouse data directly (no IRQ required).
+/// Port 0x64 bit 0 (OBF) = data ready; bit 5 (AUXOBF) = data is from mouse.
+/// Call this as a fallback when IRQ12 is not delivered (e.g. LAPIC without I/O APIC).
+pub fn poll() {
+    loop {
+        let status: u8 = unsafe { Port::new(STATUS_PORT).read() };
+        // Both OBF and AUXOBF must be set for mouse data
+        if status & 0x21 != 0x21 {
+            break;
+        }
+        handle_packet();
     }
 }
 

@@ -25,6 +25,8 @@ pub struct Scheduler {
     pub blocked_threads: BTreeMap<u64, Thread>,
     /// Whether the scheduler has been initialized.
     pub initialized: bool,
+    /// Whether gaming performance mode is active (Phase 47).
+    pub is_game_mode: bool,
 }
 
 impl Scheduler {
@@ -34,6 +36,7 @@ impl Scheduler {
             current: None,
             blocked_threads: BTreeMap::new(),
             initialized: false,
+            is_game_mode: false,
         }
     }
 }
@@ -54,6 +57,15 @@ pub fn spawn(name: &str, entry: fn(), priority: u8) {
     SCHEDULER.lock().ready_queue.push_back(thread);
 
     // Record app launch for predictive scheduling
+    crate::ai::predictor::record_app_launch(name);
+}
+
+/// Spawn a kernel thread with a 512 KiB stack.
+/// Use this for threads that do deep HTTPS call chains (browser, net daemon).
+pub fn spawn_large(name: &str, entry: fn(), priority: u8) {
+    let thread = Thread::new_large(name, entry, priority);
+    crate::serial_println!("[scheduler] Spawned thread '{}' (tid={}, stack=512K)", thread.name, thread.tid);
+    SCHEDULER.lock().ready_queue.push_back(thread);
     crate::ai::predictor::record_app_launch(name);
 }
 
@@ -553,6 +565,7 @@ pub fn fork_current_thread(child_pid: u64, child_cr3: u64) -> u64 {
         priority: 5,
         is_user: true,
         cr3: child_cr3,
+        canary: crate::process::thread::gen_canary(tid),
     };
 
     SCHEDULER.lock().ready_queue.push_back(child_thread);

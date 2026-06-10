@@ -54,9 +54,6 @@ impl TpmDevice {
 
     /// Simulate reading the Platform Configuration Registers (PCRs).
     pub fn read_pcr(&self, index: u8) -> [u8; 32] {
-        // In a real implementation, we would construct a TPM2_PCR_Read command,
-        // write it to the Command Buffer, set the START register, wait for completion,
-        // and read the Response Buffer.
         let mut pcr = [0u8; 32];
         if self.is_active {
             pcr[0] = index;
@@ -66,6 +63,26 @@ impl TpmDevice {
             pcr[3] = 0xCC;
         }
         pcr
+    }
+
+    /// Extend a PCR with a new hash (SHA-256).
+    pub fn extend_pcr(&mut self, index: u8, hash: [u8; 32]) {
+        if !self.is_active { return; }
+        crate::serial_println!("[tpm] Extending PCR {} with hash...", index);
+        // In real hardware, we'd send TPM2_PCR_Extend.
+        // For now, we just log the measurement.
+    }
+
+    /// Request random bytes from the TPM hardware RNG.
+    pub fn get_random(&self, buf: &mut [u8]) -> Result<(), &'static str> {
+        if !self.is_active { return Err("TPM not active"); }
+        // Simulate hardware RNG
+        let mut seed = crate::drivers::timer::uptime_ticks();
+        for i in 0..buf.len() {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            buf[i] = (seed >> (i % 8)) as u8;
+        }
+        Ok(())
     }
 }
 

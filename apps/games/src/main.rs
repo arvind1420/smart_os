@@ -3,8 +3,12 @@
 
 extern crate alloc;
 
-use smartsdk::gui::{Window, EVENT_MOUSE_CLICK};
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec::Vec;
+use smartsdk::ui::{UiApp, VBox, HBox, Label, Button, Icon, Widget, Rect};
 use smartsdk::io::print;
+use smartsdk::syscall::{syscall1, syscall2, SYS_DISPLAY_CMD, SYS_DISPLAY_EVENT};
 use core::alloc::{GlobalAlloc, Layout};
 
 // Standard Smart OS User-space Allocator (Bump)
@@ -36,56 +40,31 @@ static ALLOCATOR: BumpAllocator = BumpAllocator {
     next: core::sync::atomic::AtomicUsize::new(0),
 };
 
+// ═══════════════════════════════════════════════════════════════
+//  Main
+// ═══════════════════════════════════════════════════════════════
+
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    print("Starting Smart Games...
-");
+    print("Starting Smart Game Store...\n");
 
-    if let Some(win) = Window::new(400, 400) {
-        win.draw_text(10, 10, "--- SMART GAMES ---");
-        
-        let mut target_x = 200;
-        let mut target_y = 200;
-        let mut score = 0;
-        
-        // Very simple click-the-target game
-        win.draw_text(10, 30, "Click the target!");
-        win.draw_text(10, 50, "Score: 0");
-        
-        // Draw initial target
-        win.add_button(target_x, target_y, 40, 40);
+    let mut root = VBox::new();
+    root.add(Label::new("--- SMART GAME STORE ---"));
+    root.add(Label::new("Vulkan-Powered Gaming Platform"));
+    
+    let mut game_list = HBox::new();
+    game_list.add(Icon::new("Doom OS", "/bin/doom"));
+    game_list.add(Icon::new("RustCraft", "/bin/rustcraft"));
+    game_list.add(Icon::new("CyberRun", "/bin/cyberrun"));
+    root.add(game_list);
 
-        loop {
-            while let Some(ev) = Window::poll_event() {
-                if ev.event_type == EVENT_MOUSE_CLICK {
-                    let mx = ev.data[0] as u16;
-                    let my = ev.data[1] as u16;
-                    
-                    // Check if click is inside the target button (roughly)
-                    if mx >= target_x && mx <= target_x + 40 && my >= target_y && my <= target_y + 40 {
-                        score += 1;
-                        
-                        // Clear old text and redraw score
-                        win.draw_text(10, 50, "Score:    "); // clear
-                        
-                        let mut buf = [0u8; 32];
-                        let score_str = smartsdk::format_buf!(&mut buf, "Score: {}", score);
-                        win.draw_text(10, 50, score_str);
-                        
-                        // Move target (simple pseudo-random based on current pos)
-                        target_x = (target_x + 73) % 360;
-                        target_y = (target_y + 111) % 360;
-                        if target_y < 100 { target_y += 100; }
-                        
-                        // The SDK doesn't easily let us move buttons yet without full redraw,
-                        // so for MVP we just draw a new button on top. In a real game we'd
-                        // use a graphics API.
-                        win.add_button(target_x, target_y, 40, 40);
-                    }
-                }
-            }
-            for _ in 0..1_000_000 { core::hint::spin_loop(); }
-        }
+    root.add(Button::new(" Enable Performance Mode "));
+
+    if let Some(mut app) = UiApp::new("Game Store", 600, 400, Box::new(root)) {
+        app.bg_color = 0x0A0A0A;
+        app.run(|_root| {
+            // Logic for launching games or enabling game mode
+        });
     }
 
     smartsdk::syscall::exit(0);

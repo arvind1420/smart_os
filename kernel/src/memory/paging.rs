@@ -286,6 +286,17 @@ pub fn translate_user_addr(user_vaddr: u64) -> Result<u64, &'static str> {
     }
 }
 
+/// Translate a virtual address using a specific PML4 (not the current CR3).
+/// Returns the physical address of the byte at `vaddr`, or None if not mapped.
+/// Used by the ELF loader to resolve relocations in a newly-created page table.
+pub fn translate_in_pml4(pml4_frame: PhysFrame<Size4KiB>, vaddr: VirtAddr) -> Option<PhysAddr> {
+    let virt = phys_to_virt(pml4_frame.start_address());
+    let l4_table: &mut PageTable = unsafe { &mut *virt.as_mut_ptr() };
+    let page_table = unsafe { OffsetPageTable::new(l4_table, phys_offset()) };
+    use x86_64::structures::paging::Translate;
+    page_table.translate_addr(vaddr)
+}
+
 /// Safely copy data from user space to kernel space, traversing page boundaries.
 pub fn copy_from_user(mut dst: &mut [u8], mut src_vaddr: u64) -> Result<(), &'static str> {
     while !dst.is_empty() {

@@ -1,6 +1,6 @@
 /// Smart OS Settings — System control panel application.
 ///
-/// Tabbed interface showing System, Display, Network, and About info.
+/// Tabbed interface: System, Display, Network, Language, About.
 /// Auto-refreshes periodically.
 
 use alloc::format;
@@ -19,6 +19,7 @@ pub enum SettingsTab {
     System,
     Display,
     Network,
+    Language,
     About,
 }
 
@@ -43,23 +44,25 @@ pub fn run() {
         let mut win = Window::new("Settings", 200, 80, 460, 340, ACCENT_PURPLE);
         win.use_widgets = true;
 
-        // Widget 0-3: Tab buttons
-        let tab_w = 100;
+        // Widget 0-4: Tab buttons (5 tabs × 84 px + 4 gaps × 4 px = 436 px < 460 px)
+        let tab_w = 84;
         let tab_h = 22;
         win.widgets.push(Widget::new(0, 0, 0, tab_w, tab_h,
-            WidgetKind::Button(Button::new("System", ACCENT_GREEN, AppCommand::ButtonClicked(0)))));
-        win.widgets.push(Widget::new(1, tab_w + 4, 0, tab_w, tab_h,
-            WidgetKind::Button(Button::new("Display", ACCENT_CYAN, AppCommand::ButtonClicked(1)))));
+            WidgetKind::Button(Button::new("System",   ACCENT_GREEN,   AppCommand::ButtonClicked(0)))));
+        win.widgets.push(Widget::new(1, (tab_w + 4), 0, tab_w, tab_h,
+            WidgetKind::Button(Button::new("Display",  ACCENT_CYAN,    AppCommand::ButtonClicked(1)))));
         win.widgets.push(Widget::new(2, (tab_w + 4) * 2, 0, tab_w, tab_h,
-            WidgetKind::Button(Button::new("Network", ACCENT_ORANGE, AppCommand::ButtonClicked(2)))));
+            WidgetKind::Button(Button::new("Network",  ACCENT_ORANGE,  AppCommand::ButtonClicked(2)))));
         win.widgets.push(Widget::new(3, (tab_w + 4) * 3, 0, tab_w, tab_h,
-            WidgetKind::Button(Button::new("About", ACCENT_MAGENTA, AppCommand::ButtonClicked(3)))));
+            WidgetKind::Button(Button::new("Language", ACCENT_MAGENTA, AppCommand::ButtonClicked(3)))));
+        win.widgets.push(Widget::new(4, (tab_w + 4) * 4, 0, tab_w, tab_h,
+            WidgetKind::Button(Button::new("About",    ACCENT_PURPLE,  AppCommand::ButtonClicked(4)))));
 
-        // Widget 4: Content area (scrollable text)
-        win.widgets.push(Widget::new(4, 0, 28, 440, 280,
+        // Widget 5: Content area (scrollable text)
+        win.widgets.push(Widget::new(5, 0, 28, 440, 280,
             WidgetKind::ScrollText(ScrollableText::new(200))));
 
-        win.focused_widget = Some(4);
+        win.focused_widget = Some(5);
         let id = win.id;
         desk.wm.add(win);
         id
@@ -83,6 +86,7 @@ pub fn run() {
                             0 => SettingsTab::System,
                             1 => SettingsTab::Display,
                             2 => SettingsTab::Network,
+                            3 => SettingsTab::Language,
                             _ => SettingsTab::About,
                         };
                         state.dirty = true;
@@ -117,13 +121,14 @@ pub fn sync_to_window(window: &mut Window) {
     state.dirty = false;
 
     let lines = match state.active_tab {
-        SettingsTab::System => build_system_info(),
-        SettingsTab::Display => build_display_info(),
-        SettingsTab::Network => build_network_info(),
-        SettingsTab::About => build_about_info(),
+        SettingsTab::System   => build_system_info(),
+        SettingsTab::Display  => build_display_info(),
+        SettingsTab::Network  => build_network_info(),
+        SettingsTab::Language => build_language_info(),
+        SettingsTab::About    => build_about_info(),
     };
 
-    if let Some(w) = window.widgets.get_mut(4) {
+    if let Some(w) = window.widgets.get_mut(5) {
         if let WidgetKind::ScrollText(ref mut scroll) = w.kind {
             scroll.lines.clear();
             for (text, color) in lines {
@@ -145,7 +150,7 @@ fn build_system_info() -> Vec<(String, Color)> {
     let mut lines = Vec::new();
     lines.push((String::from("  ── System Information ──"), ACCENT_GREEN));
     lines.push((String::new(), TEXT_PRIMARY));
-    lines.push((format!("  Kernel:    Smart OS v0.9.0"), TEXT_PRIMARY));
+    lines.push((format!("  Kernel:    Smart OS v0.20.0"), TEXT_PRIMARY));
     lines.push((format!("  CPUs:      {} core(s)", cpus), TEXT_PRIMARY));
     lines.push((format!("  Threads:   {} active", threads), TEXT_PRIMARY));
     lines.push((format!("  Uptime:    {:02}:{:02}:{:02}", hours, mins, secs), TEXT_PRIMARY));
@@ -166,15 +171,18 @@ fn build_system_info() -> Vec<(String, Color)> {
 }
 
 fn build_display_info() -> Vec<(String, Color)> {
-    let (sw, sh) = crate::gui::compositor::screen_size();
+    let (sw, sh) = {
+        let (w, h) = crate::gui::compositor::fb_resolution();
+        (w as usize, h as usize)
+    };
     let mut lines = Vec::new();
     lines.push((String::from("  ── Display Information ──"), ACCENT_CYAN));
     lines.push((String::new(), TEXT_PRIMARY));
     lines.push((format!("  Resolution: {}x{}", sw, sh), TEXT_PRIMARY));
     lines.push((String::from("  Renderer:   Software (CPU)"), TEXT_PRIMARY));
     lines.push((String::from("  Buffer:     Double-buffered"), TEXT_PRIMARY));
-    lines.push((String::from("  Font:       8x16 bitmap (small)"), TEXT_PRIMARY));
-    lines.push((String::from("              10x20 bitmap (large)"), TEXT_PRIMARY));
+    lines.push((String::from("  Font:       TrueType (14px anti-aliased)"), TEXT_PRIMARY));
+    lines.push((String::from("              8x16 bitmap fallback"), TEXT_PRIMARY));
     lines.push((String::from("  Theme:      Cyberpunk Neon Dark"), TEXT_PRIMARY));
     lines
 }
@@ -201,28 +209,55 @@ fn build_network_info() -> Vec<(String, Color)> {
     lines
 }
 
+fn build_language_info() -> Vec<(String, Color)> {
+    use crate::i18n::{LocaleId, locale, get_locale, format_number, format_date, format_currency, format_time};
+    let current = get_locale();
+    let loc     = locale(current);
+    let mut lines = Vec::new();
+
+    lines.push((String::from("  \u{2500}\u{2500} Language & Region \u{2500}\u{2500}"), ACCENT_MAGENTA));
+    lines.push((String::new(), TEXT_PRIMARY));
+    lines.push((format!("  Locale:     {}", loc.code),                              ACCENT_CYAN));
+    lines.push((format!("  Language:   {}", loc.name),                              TEXT_PRIMARY));
+    lines.push((format!("  Direction:  {}", if loc.is_rtl { "RTL" } else { "LTR" }), TEXT_PRIMARY));
+    lines.push((format!("  Time:       {}", if loc.time_24h { "24-hour" } else { "12-hour AM/PM" }), TEXT_PRIMARY));
+    lines.push((String::new(), TEXT_PRIMARY));
+
+    lines.push((String::from("  \u{2500}\u{2500} Format Examples \u{2500}\u{2500}"), ACCENT_CYAN));
+    lines.push((format!("  Number:     {}", format_number(1_234_567, current)),     TEXT_PRIMARY));
+    lines.push((format!("  Date:       {}", format_date(2024, 12, 25, current)),    TEXT_PRIMARY));
+    lines.push((format!("  Time:       {}", format_time(14, 30, 0, current)),       TEXT_PRIMARY));
+    lines.push((format!("  Currency:   {}", format_currency(9999, current)),        TEXT_PRIMARY));
+    lines.push((String::new(), TEXT_PRIMARY));
+
+    lines.push((String::from("  \u{2500}\u{2500} Available Locales \u{2500}\u{2500}"), ACCENT_CYAN));
+    for &id in LocaleId::all() {
+        let l      = locale(id);
+        let active = id == current;
+        let marker = if active { "  \u{25BA} " } else { "    " };
+        let color  = if active { ACCENT_GREEN } else { TEXT_SECONDARY };
+        lines.push((format!("{}[{}]  {}", marker, l.code, l.name), color));
+    }
+
+    lines
+}
+
 fn build_about_info() -> Vec<(String, Color)> {
     let mut lines = Vec::new();
-    lines.push((String::from("  ── About Smart OS ──"), ACCENT_MAGENTA));
+    lines.push((String::from("  \u{2500}\u{2500} About Smart OS \u{2500}\u{2500}"), ACCENT_MAGENTA));
     lines.push((String::new(), TEXT_PRIMARY));
-    lines.push((String::from("  Smart OS v0.9.0"), ACCENT_CYAN));
+    lines.push((String::from("  Smart OS v0.20.0"), ACCENT_CYAN));
     lines.push((String::from("  A real bootable x86_64 operating system"), TEXT_PRIMARY));
     lines.push((String::from("  Written in Rust (no_std, bare metal)"), TEXT_PRIMARY));
     lines.push((String::new(), TEXT_PRIMARY));
-    lines.push((String::from("  ── Architecture ──"), ACCENT_CYAN));
+    lines.push((String::from("  \u{2500}\u{2500} Architecture \u{2500}\u{2500}"), ACCENT_CYAN));
     lines.push((String::from("  Hybrid microkernel"), TEXT_PRIMARY));
     lines.push((String::from("  UEFI + BIOS bootable"), TEXT_PRIMARY));
     lines.push((String::from("  SmartPack binary format"), TEXT_PRIMARY));
     lines.push((String::new(), TEXT_PRIMARY));
-    lines.push((String::from("  ── Phases Complete ──"), ACCENT_CYAN));
-    lines.push((String::from("  1: Boot + SmartPack"), TEXT_SECONDARY));
-    lines.push((String::from("  2: Drivers + IPC + GUI"), TEXT_SECONDARY));
-    lines.push((String::from("  3: AI + SmartFS + Plugins"), TEXT_SECONDARY));
-    lines.push((String::from("  4: Apps + Widgets"), TEXT_SECONDARY));
-    lines.push((String::from("  5: User-space (ring-3)"), TEXT_SECONDARY));
-    lines.push((String::from("  6: Network + Storage + SMP"), TEXT_SECONDARY));
-    lines.push((String::from("  7: AI Intelligence"), TEXT_SECONDARY));
-    lines.push((String::from("  8: TCP + USB + FAT32"), TEXT_SECONDARY));
-    lines.push((String::from("  9: Desktop OS Polish"), TEXT_SECONDARY));
+    lines.push((String::from("  \u{2500}\u{2500} Recent Phases \u{2500}\u{2500}"), ACCENT_CYAN));
+    lines.push((String::from("  58: AC'97 Audio Engine"),     TEXT_SECONDARY));
+    lines.push((String::from("  59: TrueType Font Rendering"), TEXT_SECONDARY));
+    lines.push((String::from("  60: Unicode & Localization"),  TEXT_SECONDARY));
     lines
 }

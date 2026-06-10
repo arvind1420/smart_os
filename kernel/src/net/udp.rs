@@ -6,7 +6,7 @@ use alloc::collections::BTreeMap;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use spin::Mutex;
-use super::{ethernet, arp, ipv4, LOCAL_IP, GATEWAY_IP, SUBNET_MASK, BROADCAST_MAC};
+use super::{ethernet, arp, ipv4, BROADCAST_MAC};
 
 const UDP_HEADER_LEN: usize = 8;
 
@@ -46,20 +46,34 @@ pub fn send(dst_ip: [u8; 4], dst_port: u16, src_port: u16, data: &[u8]) -> Resul
     udp_packet.extend_from_slice(data);
 
     // Build IPv4 packet
-    let ip_packet = ipv4::build(LOCAL_IP, dst_ip, ipv4::PROTO_UDP, &udp_packet);
+    let ip_packet = ipv4::build(super::local_ip(), dst_ip, ipv4::PROTO_UDP, &udp_packet);
 
     // Determine destination MAC
     let dst_mac = if is_local(dst_ip) {
-        // Same subnet: ARP for destination directly
         resolve_or_broadcast(dst_ip)
     } else {
-        // Different subnet: ARP for gateway
-        resolve_or_broadcast(GATEWAY_IP)
+        resolve_or_broadcast(super::gateway_ip())
     };
 
     // Build Ethernet frame
     let frame = ethernet::build(dst_mac, our_mac, ethernet::ETHERTYPE_IPV4, &ip_packet);
 
+    crate::net::send_frame(&frame)
+}
+
+/// Send a UDP datagram from an explicit source IP (used by DHCP, which sends from 0.0.0.0).
+pub fn send_raw(src_ip: [u8; 4], dst_ip: [u8; 4], dst_port: u16, src_port: u16, data: &[u8]) -> Result<(), &'static str> {
+    let our_mac = crate::net::mac_address().ok_or("No network device")?;
+    let udp_length = (UDP_HEADER_LEN + data.len()) as u16;
+    let mut udp_packet = Vec::with_capacity(udp_length as usize);
+    udp_packet.extend_from_slice(&src_port.to_be_bytes());
+    udp_packet.extend_from_slice(&dst_port.to_be_bytes());
+    udp_packet.extend_from_slice(&udp_length.to_be_bytes());
+    udp_packet.extend_from_slice(&[0u8; 2]);
+    udp_packet.extend_from_slice(data);
+    let ip_packet = ipv4::build(src_ip, dst_ip, ipv4::PROTO_UDP, &udp_packet);
+    // Always use broadcast MAC for DHCP (destination is broadcast or server before we have IP)
+    let frame = ethernet::build(BROADCAST_MAC, our_mac, ethernet::ETHERTYPE_IPV4, &ip_packet);
     crate::net::send_frame(&frame)
 }
 
@@ -100,10 +114,10 @@ pub fn handle_udp(src_ip: [u8; 4], payload: &[u8]) {
 
 /// Check if an IP is on the local subnet.
 fn is_local(ip: [u8; 4]) -> bool {
+    let local = super::local_ip();
+    let mask  = super::subnet_mask();
     for i in 0..4 {
-        if (ip[i] & SUBNET_MASK[i]) != (LOCAL_IP[i] & SUBNET_MASK[i]) {
-            return false;
-        }
+        if (ip[i] & mask[i]) != (local[i] & mask[i]) { return false; }
     }
     true
 }

@@ -40,10 +40,9 @@ pub fn init_heap(phys_offset: u64, memory_regions: &[bootloader_api::info::Memor
         let heap_phys_start = region.start;
         let heap_virt_start = phys_offset + heap_phys_start;
 
-        // Record the physical end of the heap so the frame allocator
-        // knows not to hand out these frames.
-        HEAP_PHYS_END.store(heap_phys_start + HEAP_SIZE, Ordering::Relaxed);
-
+        // NOTE: Do NOT set HEAP_PHYS_END here — serial_println! checks
+        // is_heap_ready() and tries to alloc::format! if it's set, which
+        // would crash because the allocator isn't initialized yet.
         serial_println!(
             "[heap] Initializing {} KiB heap at virt={:#X} (phys={:#X})",
             HEAP_SIZE / 1024,
@@ -56,6 +55,10 @@ pub fn init_heap(phys_offset: u64, memory_regions: &[bootloader_api::info::Memor
                 .lock()
                 .init(heap_virt_start as *mut u8, HEAP_SIZE as usize);
         }
+
+        // ONLY NOW mark the heap as ready. After this point serial_println!
+        // will safely use alloc::format! for the ring-buffer path.
+        HEAP_PHYS_END.store(heap_phys_start + HEAP_SIZE, Ordering::Relaxed);
 
         serial_println!("[heap] Allocator ready.");
     } else {

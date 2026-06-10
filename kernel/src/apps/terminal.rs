@@ -22,14 +22,20 @@ pub struct TerminalState {
     pub cwd: String,
     /// Output lines: (text, color).
     pub output: Vec<(String, Color)>,
-    /// Command history.
+    /// Command history (oldest first).
     pub cmd_history: Vec<String>,
+    /// Current position in history during Up/Down navigation (None = not navigating).
+    pub history_pos: Option<usize>,
+    /// Saved input text when history navigation starts (so Down can restore it).
+    pub history_saved: String,
     /// Whether state changed and needs GUI sync.
     pub dirty: bool,
     /// Piped input lines for current command (grep, head, tail, wc, etc.)
     pub pipe_input: Vec<String>,
     /// User-defined command aliases: (name, expansion).
     pub aliases: Vec<(String, String)>,
+    /// Background job names (for `jobs` command).
+    pub bg_jobs: Vec<String>,
 }
 
 pub static STATE: Mutex<Option<TerminalState>> = Mutex::new(None);
@@ -82,9 +88,12 @@ pub fn run() {
         cwd: String::from("/"),
         output,
         cmd_history: Vec::new(),
+        history_pos: None,
+        history_saved: String::new(),
         dirty: true,
         pipe_input: Vec::new(),
         aliases: Vec::new(),
+        bg_jobs: Vec::new(),
     });
 
     // Main loop: poll for widget actions
@@ -95,12 +104,18 @@ pub fn run() {
                     if !cmd.is_empty() {
                         let mut state = STATE.lock();
                         if let Some(ref mut s) = *state {
+                            // Reset history navigation on command submit
+                            s.history_pos = None;
+                            s.history_saved.clear();
+
                             let prompt = format!("{}> {}", s.cwd, cmd);
                             s.output.push((prompt, ACCENT_GREEN));
-                            s.cmd_history.push(cmd.clone());
+                            // Avoid duplicate consecutive history entries
+                            if s.cmd_history.last().map(|l| l.as_str()) != Some(cmd.as_str()) {
+                                s.cmd_history.push(cmd.clone());
+                            }
                             let before_len = s.output.len();
                             execute(&cmd, s);
-                            // Echo only the new lines this command produced
                             for line in &s.output[before_len..] {
                                 if !line.0.is_empty() {
                                     crate::serial_println!("[terminal:out] {}", line.0);
@@ -111,6 +126,78 @@ pub fn run() {
                         }
                     }
                 }
+
+                WidgetAction::Execute(AppCommand::HistoryPrev) => {
+                    let text = {
+                        let mut state = STATE.lock();
+                        if let Some(ref mut s) = *state {
+                            if s.cmd_history.is_empty() { None } else {
+                                let new_pos = match s.history_pos {
+                                    None => {
+                                        // Start navigating; save current input
+                                        // (we can't read it here, so we use an empty saved for now)
+                                        Some(s.cmd_history.len() - 1)
+                                    }
+                                    Some(p) => Some(p.saturating_sub(1)),
+                                };
+                                s.history_pos = new_pos;
+                                new_pos.map(|p| s.cmd_history[p].clone())
+                            }
+                        } else { None }
+                    };
+                    if let Some(txt) = text {
+                        set_input_text(window_id, txt);
+                    }
+                }
+
+                WidgetAction::Execute(AppCommand::HistoryNext) => {
+                    let text = {
+                        let mut state = STATE.lock();
+                        if let Some(ref mut s) = *state {
+                            match s.history_pos {
+                                None => None,
+                                Some(p) => {
+                                    let next = p + 1;
+                                    if next >= s.cmd_history.len() {
+                                        s.history_pos = None;
+                                        Some(s.history_saved.clone())
+                                    } else {
+                                        s.history_pos = Some(next);
+                                        Some(s.cmd_history[next].clone())
+                                    }
+                                }
+                            }
+                        } else { None }
+                    };
+                    if let Some(txt) = text {
+                        set_input_text(window_id, txt);
+                    }
+                }
+
+                WidgetAction::Execute(AppCommand::TabComplete(partial)) => {
+                    let completion = {
+                        let state = STATE.lock();
+                        if let Some(ref s) = *state {
+                            tab_complete(&partial, &s.cwd)
+                        } else { None }
+                    };
+                    if let Some(completed) = completion {
+                        set_input_text(window_id, completed);
+                    }
+                }
+
+                WidgetAction::Execute(AppCommand::Interrupt) => {
+                    let mut state = STATE.lock();
+                    if let Some(ref mut s) = *state {
+                        s.output.push((String::from("^C"), ACCENT_RED));
+                        s.dirty = true;
+                    }
+                    // Send SIGINT to current foreground process (best-effort)
+                    if let Some(pid) = crate::process::scheduler::current_pid() {
+                        let _ = crate::process::signal::send_signal(pid, crate::process::signal::Signal::Int);
+                    }
+                }
+
                 // Consume Redraw and other actions so the queue doesn't fill up
                 _ => {}
             }
@@ -120,6 +207,91 @@ pub fn run() {
         for _ in 0..5 {
             crate::process::scheduler::yield_now();
         }
+    }
+}
+
+/// Set the TextInput widget (id=1) text and cursor, triggering a redraw.
+fn set_input_text(window_id: WindowId, text: String) {
+    use crate::gui::widget::WidgetKind;
+    let mut desktop = DESKTOP.lock();
+    if let Some(ref mut desk) = *desktop {
+        if let Some(win) = desk.wm.get_mut(window_id) {
+            if let Some(widget) = win.get_widget_mut(1) {
+                if let WidgetKind::TextInput(ref mut ti) = widget.kind {
+                    let len = text.len();
+                    ti.text = text;
+                    ti.cursor_pos = len;
+                }
+            }
+        }
+    }
+}
+
+/// Tab-complete `partial` in `cwd`. Returns the completed string if unambiguous.
+fn tab_complete(partial: &str, cwd: &str) -> Option<String> {
+    let words: Vec<&str> = partial.split_whitespace().collect();
+
+    // Completing the first word → command name
+    if words.len() <= 1 {
+        let prefix = words.first().copied().unwrap_or("");
+        let commands = [
+            "help", "clear", "pwd", "ls", "cd", "cat", "mkdir", "echo", "write",
+            "tree", "ps", "mem", "uptime", "info", "grep", "head", "tail", "wc",
+            "cp", "mv", "rm", "touch", "find", "history", "alias", "which", "env",
+            "export", "kill", "exec", "procs", "usrrun", "fds", "waitinfo",
+            "shutdown", "reboot", "date", "hostname", "whoami", "version",
+            "netinfo", "udpsend", "ping", "http", "dns", "dhcprenew",
+            "diskinfo", "diskls", "diskwrite", "diskcat", "cpus",
+            "predict", "kginfo", "kgquery", "security", "partinfo",
+            "tcpinfo", "tcpconnect", "tcpsend", "tcprecv", "tcpclose", "tcplisten",
+            "usbinfo", "fat32ls", "fat32cat", "edit", "calc", "taskmgr", "settings",
+            "notify", "clipboard", "cowinfo", "shmem", "aslr", "swapinfo",
+            "smpinfo", "strace", "sandbox", "gdbinfo", "workspace", "theme",
+            "ipv6info", "pkg", "jobs", "uname", "lspci", "dmesg", "df", "top",
+        ];
+        let matches: Vec<&str> = commands.iter().copied()
+            .filter(|c| c.starts_with(prefix))
+            .collect();
+        return match matches.len() {
+            1 => Some(format!("{} ", matches[0])),
+            _ => None, // ambiguous or no match
+        };
+    }
+
+    // Completing a path argument
+    let path_prefix = *words.last().unwrap_or(&"");
+    let (dir_part, file_prefix) = if let Some(slash) = path_prefix.rfind('/') {
+        (&path_prefix[..=slash], &path_prefix[slash + 1..])
+    } else {
+        ("", path_prefix)
+    };
+
+    let search_dir = if dir_part.is_empty() {
+        cwd.to_owned()
+    } else if dir_part.starts_with('/') {
+        dir_part.trim_end_matches('/').to_owned()
+    } else {
+        format!("{}/{}", cwd.trim_end_matches('/'), dir_part.trim_end_matches('/'))
+    };
+
+    let entries = crate::vfs::readdir(&search_dir).unwrap_or_default();
+    let matches: Vec<String> = entries.iter()
+        .filter(|e: &&String| e.starts_with(file_prefix))
+        .cloned()
+        .collect();
+
+    match matches.len() {
+        1 => {
+            let completed_path = if dir_part.is_empty() {
+                matches[0].clone()
+            } else {
+                format!("{}{}", dir_part, matches[0])
+            };
+            // Replace last word with completion
+            let base = &partial[..partial.len() - path_prefix.len()];
+            Some(format!("{}{}", base, completed_path))
+        }
+        _ => None,
     }
 }
 
@@ -229,7 +401,28 @@ fn parse_redirection(cmd: &str) -> (String, Option<(String, String)>) {
 }
 
 fn execute_single(cmd: &str, state: &mut TerminalState) {
-    let parts: Vec<&str> = cmd.trim().split_whitespace().collect();
+    let cmd = cmd.trim();
+
+    // Detect background job marker: trailing `&`
+    let (cmd, background) = if cmd.ends_with('&') {
+        (cmd[..cmd.len() - 1].trim(), true)
+    } else {
+        (cmd, false)
+    };
+
+    if background {
+        let job_name = cmd.split_whitespace().next().unwrap_or(cmd).to_owned();
+        state.bg_jobs.push(job_name.clone());
+        state.output.push((format!("[{}] {} &", state.bg_jobs.len(), cmd), ACCENT_CYAN));
+        // Best-effort: spawn via scheduler if it's a known binary path
+        let bin_path = format!("/bin/{}", job_name);
+        if crate::vfs::stat(&bin_path).is_ok() {
+            let _ = crate::process::scheduler::spawn_user_process(&job_name, &bin_path);
+        }
+        return;
+    }
+
+    let parts: Vec<&str> = cmd.split_whitespace().collect();
     if parts.is_empty() { return; }
 
     match parts[0] {
@@ -260,9 +453,13 @@ fn execute_single(cmd: &str, state: &mut TerminalState) {
         "udpsend" => cmd_udpsend(state, &parts[1..]),
         // Phase 6: Disk commands
         "diskinfo" => cmd_diskinfo(state),
-        "diskls" => cmd_diskls(state),
+        "diskls" => cmd_diskls(state, parts.get(1).copied()),
         "diskwrite" => cmd_diskwrite(state, &parts[1..]),
         "diskcat" => cmd_diskcat(state, parts.get(1).copied()),
+        // Phase 39: ext4 commands
+        "mount" => cmd_mount(state, parts.get(1).copied(), parts.get(2).copied()),
+        "umount" => cmd_umount(state, parts.get(1).copied()),
+        "mounts" => cmd_mounts(state),
         // Phase 6: SMP commands
         "cpus" => cmd_cpus(state),
         // Phase 7: Intelligent OS commands
@@ -337,6 +534,15 @@ fn execute_single(cmd: &str, state: &mut TerminalState) {
         "ping" => cmd_ping(state, parts.get(1).copied()),
         "http" => cmd_http(state, parts.get(1).copied()),
         "pkg" => cmd_pkg(state, &parts[1..]),
+        "dhcprenew" => cmd_dhcprenew(state),
+        "jobs" => cmd_jobs(state),
+        "useradd" => cmd_useradd(state, parts.get(1).copied(), parts.get(2).copied()),
+        "passwd"  => cmd_passwd(state, parts.get(1).copied(), parts.get(2).copied()),
+        "users"   => cmd_users(state),
+        "logout"  => cmd_logout(state),
+        "lock"    => cmd_lock(state),
+        "wifi"    => cmd_wifi(state, &parts[1..]),
+        "volume"  => cmd_volume(state, parts.get(1).copied()),
         _ => {
             state.output.push((format!("Unknown command: '{}'. Type 'help'.", parts[0]), ACCENT_RED));
         }
@@ -902,7 +1108,33 @@ fn cmd_diskinfo(state: &mut TerminalState) {
     }
 }
 
-fn cmd_diskls(state: &mut TerminalState) {
+fn cmd_diskls(state: &mut TerminalState, path: Option<&str>) {
+    // If a path is given and it's an ext4 mount, list via ext4
+    if let Some(p) = path {
+        if crate::drivers::ext4::handles_path(p) {
+            match crate::vfs::readdir(p) {
+                Ok(entries) => {
+                    state.output.push((format!("  {}  [ext4]", p), ACCENT_CYAN));
+                    for e in &entries {
+                        state.output.push((format!("    {}", e), TEXT_PRIMARY));
+                    }
+                    state.output.push((format!("  {} entries", entries.len()), TEXT_SECONDARY));
+                }
+                Err(e) => state.output.push((format!("  ext4 error: {}", e), ACCENT_RED)),
+            }
+            return;
+        }
+        // Show partinfo if user passed /dev/sdaN style
+        let parts = crate::drivers::ext4::scan_partitions();
+        state.output.push((String::from("  Partitions detected:"), ACCENT_CYAN));
+        for p in &parts {
+            let fs_type = if p.is_ext4 { "ext4" } else { "other" };
+            state.output.push((format!("  /dev/sda{}  type=0x{:02X}  lba={}  size={}  fs={}",
+                p.index, p.part_type, p.lba_start, p.lba_size, fs_type), TEXT_PRIMARY));
+        }
+        return;
+    }
+    // Default: list diskfs
     let diskfs = crate::drivers::diskfs::DISK_FS.lock();
     match diskfs.as_ref() {
         Some(fs) => {
@@ -1424,7 +1656,8 @@ fn cmd_hostname(state: &mut TerminalState) {
 }
 
 fn cmd_whoami(state: &mut TerminalState) {
-    let user = crate::process::env::get("USER")
+    let user = crate::session::current_user()
+        .or_else(|| crate::process::env::get("USER"))
         .unwrap_or(String::from("root"));
     state.output.push((user, TEXT_PRIMARY));
 }
@@ -2247,6 +2480,35 @@ fn cmd_pkg(state: &mut TerminalState, args: &[&str]) {
     }
 }
 
+fn cmd_dhcprenew(state: &mut TerminalState) {
+    state.output.push((String::from("  Sending DHCP DISCOVER..."), TEXT_SECONDARY));
+    match crate::net::dhcp::discover() {
+        Ok(()) => {
+            let info = crate::net::dhcp::lease_info();
+            let ip = info.local_ip;
+            let gw = info.gateway;
+            let dns = info.dns;
+            state.output.push((format!("  IP      : {}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]), ACCENT_GREEN));
+            state.output.push((format!("  Gateway : {}.{}.{}.{}", gw[0], gw[1], gw[2], gw[3]), TEXT_PRIMARY));
+            state.output.push((format!("  DNS     : {}.{}.{}.{}", dns[0], dns[1], dns[2], dns[3]), TEXT_PRIMARY));
+            state.output.push((format!("  Lease   : {}s", info.lease_secs), TEXT_SECONDARY));
+        }
+        Err(e) => {
+            state.output.push((format!("  DHCP failed: {}", e), ACCENT_RED));
+        }
+    }
+}
+
+fn cmd_jobs(state: &mut TerminalState) {
+    if state.bg_jobs.is_empty() {
+        state.output.push((String::from("  No background jobs."), TEXT_SECONDARY));
+    } else {
+        for (i, name) in state.bg_jobs.iter().enumerate() {
+            state.output.push((format!("  [{}] Running  {}", i + 1, name), ACCENT_CYAN));
+        }
+    }
+}
+
 // ── Pipe/head/tail helpers ──────────────────────────────────────
 
 fn parse_n_file_args<'a>(args: &[&'a str], default_n: usize) -> (usize, Option<&'a str>) {
@@ -2274,4 +2536,227 @@ fn get_lines_from_input(state: &TerminalState, file_arg: Option<&str>) -> Vec<St
         }
     }
     Vec::new()
+}
+
+// ── Phase 38: User management commands ───────────────────────────────────────
+
+fn cmd_useradd(state: &mut TerminalState, username: Option<&str>, password: Option<&str>) {
+    let username = match username {
+        Some(u) => u,
+        None => {
+            state.output.push((String::from("Usage: useradd <username> <password>"), ACCENT_RED));
+            return;
+        }
+    };
+    let password = password.unwrap_or("changeme");
+    match crate::users::add_user(username, password) {
+        Ok(()) => {
+            state.output.push((format!("User '{}' created (home: /home/{})", username, username), ACCENT_GREEN));
+        }
+        Err(e) => {
+            state.output.push((format!("useradd: {}", e), ACCENT_RED));
+        }
+    }
+}
+
+fn cmd_passwd(state: &mut TerminalState, username: Option<&str>, new_pass: Option<&str>) {
+    let current = crate::session::current_user().unwrap_or_else(|| String::from("root"));
+    let target = username.unwrap_or(&current).to_string();
+    let new_password = match new_pass {
+        Some(p) => p.to_string(),
+        None => {
+            state.output.push((format!("Usage: passwd <username> <newpassword>"), ACCENT_RED));
+            return;
+        }
+    };
+    match crate::users::change_password(&target, &new_password) {
+        Ok(()) => {
+            state.output.push((format!("Password changed for '{}'", target), ACCENT_GREEN));
+        }
+        Err(e) => {
+            state.output.push((format!("passwd: {}", e), ACCENT_RED));
+        }
+    }
+}
+
+fn cmd_users(state: &mut TerminalState) {
+    let users = crate::users::list_users();
+    let current = crate::session::current_user().unwrap_or_default();
+    state.output.push((String::from("  User accounts:"), TEXT_SECONDARY));
+    for u in &users {
+        let marker = if *u == current { " ← (you)" } else { "" };
+        state.output.push((format!("    {}{}", u, marker), TEXT_PRIMARY));
+    }
+}
+
+fn cmd_logout(state: &mut TerminalState) {
+    state.output.push((String::from("Logging out..."), ACCENT_ORANGE));
+    state.dirty = true;
+    crate::session::end_session();
+    // Respawn the login screen
+    crate::process::scheduler::spawn("login", crate::apps::login::run, 15);
+}
+
+fn cmd_lock(state: &mut TerminalState) {
+    state.output.push((String::from("Screen locked. Press Ctrl+Alt+L to unlock."), ACCENT_CYAN));
+    state.dirty = true;
+    // Show lock screen in a new thread so terminal stays alive
+    crate::process::scheduler::spawn("lockscreen", crate::apps::lockscreen::show, 16);
+}
+
+// ── Phase 39: ext4 / mount commands ──────────────────────────────────────────
+
+fn cmd_mount(state: &mut TerminalState, dev: Option<&str>, mountpoint: Option<&str>) {
+    let dev = match dev {
+        Some(d) => d,
+        None => {
+            state.output.push((String::from("  Usage: mount <lba_start|/dev/sdaN> [/mnt/point]"), ACCENT_RED));
+            state.output.push((String::from("  Example: mount 2048 /mnt/linux"), TEXT_SECONDARY));
+            return;
+        }
+    };
+    // Parse /dev/sdaN → scan partitions and find the index
+    let lba: u64 = if dev.starts_with("/dev/sda") {
+        let idx: usize = dev.trim_start_matches("/dev/sda").parse().unwrap_or(0);
+        let parts = crate::drivers::ext4::scan_partitions();
+        match parts.into_iter().find(|p| p.index == idx) {
+            Some(p) => p.lba_start,
+            None => {
+                state.output.push((format!("  Partition {} not found", dev), ACCENT_RED));
+                return;
+            }
+        }
+    } else {
+        match dev.parse::<u64>() {
+            Ok(n) => n,
+            Err(_) => {
+                state.output.push((format!("  Invalid device '{}' (expected /dev/sdaN or LBA number)", dev), ACCENT_RED));
+                return;
+            }
+        }
+    };
+    let mp = mountpoint.unwrap_or("");
+    match crate::drivers::ext4::mount(lba, mp) {
+        Ok(actual_mp) => {
+            state.output.push((format!("  Mounted at '{}'", actual_mp), ACCENT_GREEN));
+        }
+        Err(e) => {
+            state.output.push((format!("  mount: {}", e), ACCENT_RED));
+        }
+    }
+}
+
+fn cmd_umount(state: &mut TerminalState, path: Option<&str>) {
+    match path {
+        Some(p) => {
+            crate::drivers::ext4::umount(p);
+            state.output.push((format!("  Unmounted '{}'", p), ACCENT_GREEN));
+        }
+        None => {
+            state.output.push((String::from("  Usage: umount <mountpoint>"), ACCENT_RED));
+        }
+    }
+}
+
+fn cmd_mounts(state: &mut TerminalState) {
+    let mounts = crate::drivers::ext4::list_mounts();
+    if mounts.is_empty() {
+        state.output.push((String::from("  No ext4 volumes mounted."), TEXT_MUTED));
+        return;
+    }
+    state.output.push((String::from("  Mountpoint                       Label"), ACCENT_CYAN));
+    for (mp, label) in &mounts {
+        state.output.push((format!("  {:32} {}", mp, label), TEXT_PRIMARY));
+    }
+}
+
+fn cmd_wifi(state: &mut TerminalState, args: &[&str]) {
+    if args.is_empty() {
+        state.output.push((String::from("  Usage: wifi [scan|connect|status|disconnect]"), ACCENT_ORANGE));
+        return;
+    }
+    match args[0] {
+        "scan" => {
+            state.output.push((String::from("Scanning WiFi networks..."), ACCENT_CYAN));
+            state.dirty = true;
+            match crate::drivers::wifi::scan_networks() {
+                Ok(ssids) => {
+                    if ssids.is_empty() {
+                        state.output.push((String::from("No networks found."), TEXT_MUTED));
+                    } else {
+                        state.output.push((String::from("Available networks:"), ACCENT_GREEN));
+                        for ssid in ssids {
+                            state.output.push((format!("  {}", ssid), TEXT_PRIMARY));
+                        }
+                    }
+                }
+                Err(e) => {
+                    state.output.push((format!("WiFi scan error: {}", e), ACCENT_RED));
+                }
+            }
+        }
+        "connect" => {
+            if args.len() < 3 {
+                state.output.push((String::from("Usage: wifi connect <SSID> <password>"), ACCENT_RED));
+                return;
+            }
+            let ssid = args[1];
+            let password = args[2];
+            state.output.push((format!("Connecting to '{}'...", ssid), ACCENT_CYAN));
+            state.dirty = true;
+            match crate::drivers::wifi::connect(ssid, password) {
+                Ok(()) => {
+                    state.output.push((format!("Successfully connected to '{}'!", ssid), ACCENT_GREEN));
+                }
+                Err(e) => {
+                    state.output.push((format!("Failed to connect: {}", e), ACCENT_RED));
+                }
+            }
+        }
+        "status" => {
+            match crate::drivers::wifi::get_status() {
+                Ok((mlme_state, mac, ssid)) => {
+                    state.output.push((String::from("WiFi Status:"), ACCENT_CYAN));
+                    if let Some(mac_addr) = mac {
+                        state.output.push((format!("  MAC Address: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+                            mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]), TEXT_PRIMARY));
+                    }
+                    state.output.push((format!("  State: {:?}", mlme_state), TEXT_PRIMARY));
+                    if let Some(s) = ssid {
+                        state.output.push((format!("  Connected to SSID: '{}'", s), ACCENT_GREEN));
+                    }
+                }
+                Err(e) => {
+                    state.output.push((format!("WiFi driver error: {}", e), ACCENT_RED));
+                }
+            }
+        }
+        "disconnect" => {
+            match crate::drivers::wifi::disconnect() {
+                Ok(()) => {
+                    state.output.push((String::from("Disconnected from WiFi."), ACCENT_GREEN));
+                }
+                Err(e) => {
+                    state.output.push((format!("WiFi disconnect error: {}", e), ACCENT_RED));
+                }
+            }
+        }
+        _ => {
+            state.output.push((format!("Unknown wifi subcommand '{}'", args[0]), ACCENT_RED));
+        }
+    }
+}
+
+fn cmd_volume(state: &mut TerminalState, vol_arg: Option<&str>) {
+    let mut mixer = crate::drivers::hda::MIXER.lock();
+    if let Some(vol_str) = vol_arg {
+        if let Ok(vol) = vol_str.parse::<u8>() {
+            mixer.master_volume = vol.min(100);
+            state.output.push((format!("Master volume set to {}%", mixer.master_volume), ACCENT_GREEN));
+        } else {
+            state.output.push((String::from("Usage: volume <0-100>"), ACCENT_RED));
+        }
+    } else {
+        state.output.push((format!("Master volume: {}%", mixer.master_volume), TEXT_PRIMARY));
+    }
 }

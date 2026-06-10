@@ -3,7 +3,7 @@
 /// These define the ABI between threads/processes and the kernel.
 
 /// Total number of syscalls.
-pub const SYSCALL_COUNT: usize = 72;
+pub const SYSCALL_COUNT: usize = 88;
 
 // ── Process syscalls (0-9) ──
 pub const SYS_EXIT: usize = 0;
@@ -92,7 +92,24 @@ pub const SYS_SYSINFO: usize = 70;
 // ── Kernel Module syscall (71) ──
 pub const SYS_KMOD_LOAD: usize = 71;
 
+// ── AI syscalls (72) ──
+pub const SYS_AI_INFER: usize = 72;
+pub const SYS_AI_SEARCH: usize = 73;
+pub const SYS_AUDIT_READ: usize = 74;
+pub const SYS_LICENSE_CHECK: usize = 75;
+pub const SYS_TTS_SAY: usize = 76;
+pub const SYS_UI_TRAVERSE: usize = 77;
+pub const SYS_GAMEPAD_STATE: usize = 78;
+pub const SYS_SET_GAME_MODE: usize = 79;
+pub const SYS_FLEET_COMMAND: usize = 80;
+
 // ── Tensor API (Phase 18) (80-82) ──
-pub const SYS_TENSOR_CREATE: usize = 80;
-pub const SYS_TENSOR_OP: usize = 81;
-pub const SYS_TENSOR_DESTROY: usize = 82;
+pub const SYS_TENSOR_CREATE: usize = 81;
+pub const SYS_TENSOR_OP: usize = 82;
+pub const SYS_TENSOR_DESTROY: usize = 83;
+
+// ── TLS syscalls (84-87) ──
+pub const SYS_TLS_CONNECT: usize = 84;
+pub const SYS_TLS_SEND: usize = 85;
+pub const SYS_TLS_RECV: usize = 86;
+pub const SYS_TLS_CLOSE: usize = 87;
