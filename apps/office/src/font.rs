@@ -1,105 +1,13 @@
-/// Rich Text and Vector Font Rasterizer for Smart Office.
+/// Rich Text and TrueType Font Layout Engine for Smart Office.
 ///
-/// Implements a minimal quadratic bezier curve evaluator to draw scalable
-/// vector fonts directly to the window, avoiding fixed-width bitmap limitations.
-/// Also provides a Rich-Text layout engine to manage spans of text with
-/// different styles (bold, italic, size).
+/// Integrates with the system TrueType Font API to draw scalable text,
+/// computes layout metrics for exact cursor tracking, and maintains
+/// style span boundaries during edits.
 
 use smartsdk::gui::Window;
 
-/// A simple 2D point.
-#[derive(Clone, Copy)]
-pub struct Point {
-    pub x: f32,
-    pub y: f32,
-}
-
-/// A quadratic bezier curve used in TrueType fonts.
-pub struct Bezier {
-    pub p0: Point,
-    pub p1: Point,
-    pub p2: Point,
-}
-
-impl Bezier {
-    /// Evaluate the curve at t (0.0 to 1.0).
-    pub fn evaluate(&self, t: f32) -> Point {
-        let u = 1.0 - t;
-        let tt = t * t;
-        let uu = u * u;
-        let ut2 = 2.0 * u * t;
-
-        Point {
-            x: uu * self.p0.x + ut2 * self.p1.x + tt * self.p2.x,
-            y: uu * self.p0.y + ut2 * self.p1.y + tt * self.p2.y,
-        }
-    }
-}
-
-/// A very minimal Vector Font representation.
-/// Instead of parsing a real .ttf file (which requires a massive library),
-/// we define a small set of vector glyphs programmatically to prove the concept.
-pub struct VectorFont;
-
-impl VectorFont {
-    /// Draws a simulated vector character onto the window.
-    /// In a real system, this would evaluate bezier paths and use a scanline
-    /// rasterizer to fill the shape. Here we evaluate the bezier curves
-    /// and draw them by plotting points using `fill_rect` as pixels.
-    pub fn draw_char(win: &Window, c: char, x: u16, y: u16, size: u16, bold: bool, italic: bool) -> u16 {
-        let mut x_offset = x;
-        let mut y_offset = y;
-        
-        // Apply italic sheer
-        let sheer = if italic { size as f32 * 0.2 } else { 0.0 };
-        
-        // Thickness for bold
-        let thickness = if bold { 2 } else { 1 };
-
-        let draw_pixel = |win: &Window, px: u16, py: u16| {
-            for dx in 0..thickness {
-                for dy in 0..thickness {
-                    win.fill_rect(px + dx, py + dy, 1, 1, 0x000000);
-                }
-            }
-        };
-
-        // For MVP, we'll draw a simulated scalable box or line based on the character.
-        // A true rasterizer would have a dictionary of `Bezier` arrays per char.
-        if c != ' ' {
-            // Draw a basic shape to represent the vector character
-            let s = size;
-            
-            // Just mapping 'A'-'Z' to a simple scalable box to prove the vector scale works
-            for i in 0..s {
-                let sheer_offset = ((s - i) as f32 / s as f32 * sheer) as u16;
-                // Left edge
-                draw_pixel(win, x_offset + sheer_offset, y_offset + i);
-                // Right edge
-                draw_pixel(win, x_offset + s / 2 + sheer_offset, y_offset + i);
-                
-                // Top edge
-                if i == 0 {
-                    for j in 0..s/2 {
-                        draw_pixel(win, x_offset + sheer_offset + j, y_offset);
-                    }
-                }
-                // Bottom edge
-                if i == s - 1 {
-                    for j in 0..s/2 {
-                        draw_pixel(win, x_offset + sheer_offset + j, y_offset + s - 1);
-                    }
-                }
-            }
-        }
-
-        // Return the advance width
-        size / 2 + if bold { 2 } else { 0 } + 2
-    }
-}
-
 /// Rich Text Style attributes.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct TextStyle {
     pub bold: bool,
     pub italic: bool,
@@ -117,47 +25,67 @@ impl TextStyle {
 }
 
 /// A span of text with a specific style.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct TextSpan {
     pub start: usize,
     pub end: usize,
     pub style: TextStyle,
 }
 
+/// Proportional character width estimation for TrueType sans-serif font
+pub fn char_width(c: char, size: u16, bold: bool) -> u16 {
+    let base = match c {
+        'i' | 'l' | 't' | 'I' | '1' | ';' | ':' | ',' | '.' | '!' | ' ' | '\'' | '"' => 0.25,
+        'f' | 'j' | 'r' | '(' | ')' | '[' | ']' | '{' | '}' | '-' | '/' => 0.35,
+        'a' | 'b' | 'c' | 'd' | 'e' | 'g' | 'h' | 'k' | 'n' | 'o' | 'p' | 'q' | 's' | 'u' | 'v' | 'x' | 'y' | 'z' |
+        'F' | 'J' | 'L' | 'T' | 'Z' | '0' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' | '+' | '=' => 0.5,
+        'A' | 'B' | 'C' | 'D' | 'E' | 'G' | 'H' | 'K' | 'N' | 'O' | 'P' | 'Q' | 'R' | 'S' | 'U' | 'V' | 'X' | 'Y' => 0.6,
+        'w' | 'm' | 'W' | 'M' | '@' | '&' | '%' => 0.8,
+        _ => 0.5,
+    };
+    let w = (size as f32 * base) as u16;
+    w + if bold { 2 } else { 0 }
+}
+
 /// Rich Text Engine.
 /// Manages a gap buffer of raw text and a list of style spans.
 pub struct RichTextEngine<'a> {
     pub buffer: &'a crate::gap_buffer::GapBuffer,
-    pub spans: [TextSpan; 64], // Fixed array for MVP
+    pub spans: &'a [TextSpan],
     pub span_count: usize,
 }
 
 impl<'a> RichTextEngine<'a> {
-    pub fn new(buffer: &'a crate::gap_buffer::GapBuffer) -> Self {
-        let mut spans = [TextSpan { start: 0, end: 0, style: TextStyle::default() }; 64];
-        spans[0] = TextSpan {
-            start: 0,
-            end: 65536, // Covers the whole buffer initially
-            style: TextStyle::default(),
-        };
+    pub fn new(buffer: &'a crate::gap_buffer::GapBuffer, spans: &'a [TextSpan], span_count: usize) -> Self {
         Self {
             buffer,
             spans,
-            span_count: 1,
+            span_count,
         }
     }
 
-    /// Renders the rich text document using the Vector Font rasterizer.
-    pub fn render(&self, win: &Window, x_start: u16, y_start: u16) {
-        let mut out = [0u8; 4096];
+    /// Renders the rich text document using the system TrueType Font API
+    /// and returns the calculated cursor coordinates (x, y).
+    pub fn render(&self, win: &Window, x_start: u16, y_start: u16, cursor_idx: usize) -> (u16, u16) {
+        let mut out = [0u8; 8192];
         let len = self.buffer.copy_to_slice(&mut out);
 
         let mut x = x_start;
         let mut y = y_start;
         
-        let mut current_style = self.spans[0].style;
+        let mut current_style = TextStyle::default();
+        if self.span_count > 0 {
+            current_style = self.spans[0].style;
+        }
+
+        let mut cursor_coords = (x_start, y_start);
 
         for i in 0..len {
+            // Record cursor coordinates if we hit the cursor index
+            if i == cursor_idx {
+                cursor_coords = (x, y);
+            }
+
             // Check if we entered a new span
             for s in 0..self.span_count {
                 if i >= self.spans[s].start && i < self.spans[s].end {
@@ -169,19 +97,141 @@ impl<'a> RichTextEngine<'a> {
             let ch = out[i] as char;
             if ch == '\n' {
                 x = x_start;
-                y += current_style.size + 4;
+                // Line height proportional to current size + spacing
+                y += current_style.size + 8;
             } else {
-                let advance = VectorFont::draw_char(
-                    win, 
-                    ch, 
-                    x, 
-                    y, 
-                    current_style.size, 
-                    current_style.bold, 
-                    current_style.italic
-                );
-                x += advance;
+                let adv = char_width(ch, current_style.size, current_style.bold);
+                
+                let ch_str = [ch as u8];
+                if let Ok(s) = core::str::from_utf8(&ch_str) {
+                    // Draw normal text
+                    win.draw_text_ttf(x, y, current_style.size, s);
+                    // Draw offset text to simulate bold
+                    if current_style.bold {
+                        win.draw_text_ttf(x + 1, y, current_style.size, s);
+                    }
+                }
+                x += adv;
+            }
+        }
+
+        // If cursor is at the very end of text
+        if cursor_idx >= len {
+            cursor_coords = (x, y);
+        }
+
+        cursor_coords
+    }
+}
+
+/// Helper to shift and split style spans when inserting text
+pub fn adjust_spans_for_insert(
+    spans: &mut [TextSpan],
+    span_count: &mut usize,
+    idx: usize,
+    count: usize,
+    active_style: TextStyle,
+) {
+    if *span_count == 0 {
+        spans[0] = TextSpan {
+            start: 0,
+            end: 65536,
+            style: active_style,
+        };
+        *span_count = 1;
+        return;
+    }
+
+    // Shift all span boundaries strictly after idx first
+    for i in 0..*span_count {
+        if spans[i].start > idx {
+            spans[i].start += count;
+            spans[i].end += count;
+        } else if spans[i].start <= idx && spans[i].end > idx {
+            // Split or expand
+            if spans[i].style == active_style {
+                spans[i].end += count;
+            } else {
+                let old_end = spans[i].end;
+                spans[i].end = idx;
+
+                // Add the new span for the inserted text
+                if *span_count < spans.len() {
+                    spans[*span_count] = TextSpan {
+                        start: idx,
+                        end: idx + count,
+                        style: active_style,
+                    };
+                    *span_count += 1;
+                }
+
+                // Add the remaining part of the split span
+                if *span_count < spans.len() {
+                    spans[*span_count] = TextSpan {
+                        start: idx + count,
+                        end: old_end + count,
+                        style: spans[i].style,
+                    };
+                    *span_count += 1;
+                }
+                return;
+            }
+        } else if spans[i].end == idx {
+            if spans[i].style == active_style {
+                spans[i].end += count;
             }
         }
     }
+}
+
+/// Helper to shrink and remove style spans when deleting text
+pub fn adjust_spans_for_delete(
+    spans: &mut [TextSpan],
+    span_count: &mut usize,
+    idx: usize,
+    count: usize,
+) {
+    let mut remove_indices = [false; 64];
+    
+    for i in 0..*span_count {
+        let s = spans[i].start;
+        let e = spans[i].end;
+
+        if s >= idx + count {
+            // Span is entirely after the deletion
+            spans[i].start -= count;
+            spans[i].end -= count;
+        } else if e <= idx {
+            // Span is entirely before the deletion
+        } else {
+            // Overlapping
+            if s >= idx && e <= idx + count {
+                // Entirely inside deletion range
+                remove_indices[i] = true;
+            } else if s < idx && e > idx + count {
+                // Deletion inside span
+                spans[i].end -= count;
+            } else if s < idx {
+                // Deletion cuts the end
+                spans[i].end = idx;
+            } else {
+                // Deletion cuts the start
+                spans[i].start = idx;
+                spans[i].end -= count;
+            }
+        }
+    }
+
+    // Filter out deleted spans
+    let mut new_spans = [TextSpan { start: 0, end: 0, style: TextStyle::default() }; 64];
+    let mut new_count = 0;
+    for i in 0..*span_count {
+        if !remove_indices[i] && spans[i].start < spans[i].end {
+            new_spans[new_count] = spans[i];
+            new_count += 1;
+        }
+    }
+    
+    spans[..new_count].copy_from_slice(&new_spans[..new_count]);
+    *span_count = new_count;
 }

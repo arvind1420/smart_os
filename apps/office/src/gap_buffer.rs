@@ -70,13 +70,17 @@ impl GapBuffer {
         let out_first = first_part_len.min(out.len());
         out[..out_first].copy_from_slice(&self.buffer[..out_first]);
         
-        let mut out_second = second_part_len.min(out.len() - out_first);
+        let out_second = second_part_len.min(out.len() - out_first);
         if out_second > 0 {
             out[out_first..out_first + out_second]
                 .copy_from_slice(&self.buffer[self.gap_end..self.gap_end + out_second]);
         }
         
         out_first + out_second
+    }
+
+    pub fn cursor_position(&self) -> usize {
+        self.gap_start
     }
 
     pub fn len(&self) -> usize {

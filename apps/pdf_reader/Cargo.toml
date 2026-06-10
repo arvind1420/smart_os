@@ -1,0 +1,11 @@
+[package]
+name = "pdf_reader"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+smartsdk = { path = "../../smartsdk" }
+
+[[bin]]
+name = "pdf_reader"
+path = "src/main.rs"

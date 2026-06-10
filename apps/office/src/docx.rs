@@ -1,14 +1,15 @@
-/// .docx (Office Open XML) Exporter for Smart Office.
+/// .docx (Office Open XML) Exporter and Importer for Smart Office.
 ///
-/// Implements a minimal zip container and XML generators to create a
-/// valid `.docx` file in a `#![no_std]` environment without large
-/// dependencies.
+/// Implements a minimal zip container and XML generators/parsers to create and read
+/// valid `.docx` files in a `#![no_std]` environment without large dependencies.
+
+use crate::font::{TextSpan, TextStyle};
 
 /// A very simple uncompressed ZIP file creator.
 pub struct ZipWriter<'a> {
     buffer: &'a mut [u8],
     offset: usize,
-    central_directory: [u8; 4096],
+    central_directory: [u8; 8192],
     cd_offset: usize,
     file_count: u16,
 }
@@ -18,7 +19,7 @@ impl<'a> ZipWriter<'a> {
         Self {
             buffer,
             offset: 0,
-            central_directory: [0; 4096],
+            central_directory: [0; 8192],
             cd_offset: 0,
             file_count: 0,
         }
@@ -100,8 +101,8 @@ impl<'a> ZipWriter<'a> {
     }
 }
 
-/// Generates a .docx file containing the given text.
-pub fn generate_docx(text: &[u8], out_buffer: &mut [u8]) -> usize {
+/// Generates a .docx file containing the given text and formatting spans.
+pub fn generate_docx(text: &[u8], spans: &[TextSpan], span_count: usize, out_buffer: &mut [u8]) -> usize {
     let mut zip = ZipWriter::new(out_buffer);
 
     // 1. [Content_Types].xml
@@ -121,51 +122,239 @@ pub fn generate_docx(text: &[u8], out_buffer: &mut [u8]) -> usize {
     zip.add_file("_rels/.rels", rels);
 
     // 3. word/document.xml
-    // We dynamically build this based on the text.
-    let mut doc_xml = [0u8; 16384]; // 16KB XML buffer
-    let mut offset = 0;
-    
-    let header = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    let mut doc_xml = alloc::vec::Vec::new();
+    doc_xml.extend_from_slice(br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-  <w:body>"#;
-    doc_xml[offset..offset + header.len()].copy_from_slice(header);
-    offset += header.len();
+  <w:body>"#);
 
-    // Iterate through lines and create paragraphs
+    // Iterate through text lines and construct paragraph blocks
     let mut line_start = 0;
     for i in 0..=text.len() {
         if i == text.len() || text[i] == b'\n' {
-            let p_start = br#"<w:p><w:r><w:t xml:space="preserve">"#;
-            if offset + p_start.len() < doc_xml.len() {
-                doc_xml[offset..offset + p_start.len()].copy_from_slice(p_start);
-                offset += p_start.len();
+            // Write paragraph start tag
+            doc_xml.extend_from_slice(br#"<w:p>"#);
+
+            // Output runs of text inside the paragraph matching active spans
+            let line_end = i;
+            let mut current_pos = line_start;
+
+            while current_pos < line_end {
+                // Find matching span
+                let mut style = TextStyle::default();
+                let mut span_end = line_end;
+
+                for s in 0..span_count {
+                    if current_pos >= spans[s].start && current_pos < spans[s].end {
+                        style = spans[s].style;
+                        span_end = span_end.min(spans[s].end);
+                        break;
+                    }
+                }
+
+                let run_len = span_end - current_pos;
+                if run_len > 0 {
+                    doc_xml.extend_from_slice(br#"<w:r>"#);
+                    
+                    // Render Run Properties
+                    if style.bold || style.italic || style.size != 16 {
+                        doc_xml.extend_from_slice(br#"<w:rPr>"#);
+                        if style.bold {
+                            doc_xml.extend_from_slice(br#"<w:b/>"#);
+                        }
+                        if style.italic {
+                            doc_xml.extend_from_slice(br#"<w:i/>"#);
+                        }
+                        if style.size != 16 {
+                            // w:sz val is in half-points (e.g. 16pt -> 32)
+                            let sz_val = style.size * 2;
+                            doc_xml.extend_from_slice(br#"<w:sz w:val=""#);
+                            // Simple integer to string conversion
+                            let mut num_buf = [0u8; 10];
+                            let num_str = u16_to_str(sz_val, &mut num_buf);
+                            doc_xml.extend_from_slice(num_str.as_bytes());
+                            doc_xml.extend_from_slice(br#"" />"#);
+                        }
+                        doc_xml.extend_from_slice(br#"</w:rPr>"#);
+                    }
+
+                    // Text tag
+                    doc_xml.extend_from_slice(br#"<w:t xml:space="preserve">"#);
+                    
+                    // Copy run text with XML escaping
+                    for &b in &text[current_pos..span_end] {
+                        match b {
+                            b'&' => doc_xml.extend_from_slice(br#"&amp;"#),
+                            b'<' => doc_xml.extend_from_slice(br#"&lt;"#),
+                            b'>' => doc_xml.extend_from_slice(br#"&gt;"#),
+                            _ => doc_xml.push(b),
+                        }
+                    }
+
+                    doc_xml.extend_from_slice(br#"</w:t></w:r>"#);
+                }
+
+                current_pos = span_end;
             }
 
-            let len = i - line_start;
-            if len > 0 && offset + len < doc_xml.len() {
-                // Minimal XML escaping could go here (e.g. '&' -> '&amp;').
-                // For MVP, we copy raw.
-                doc_xml[offset..offset + len].copy_from_slice(&text[line_start..i]);
-                offset += len;
-            }
-
-            let p_end = br#"</w:t></w:r></w:p>"#;
-            if offset + p_end.len() < doc_xml.len() {
-                doc_xml[offset..offset + p_end.len()].copy_from_slice(p_end);
-                offset += p_end.len();
-            }
-
+            // Write paragraph end tag
+            doc_xml.extend_from_slice(br#"</w:p>"#);
             line_start = i + 1;
         }
     }
 
-    let footer = br#"</w:body></w:document>"#;
-    if offset + footer.len() < doc_xml.len() {
-        doc_xml[offset..offset + footer.len()].copy_from_slice(footer);
-        offset += footer.len();
-    }
-
-    zip.add_file("word/document.xml", &doc_xml[..offset]);
+    doc_xml.extend_from_slice(br#"</w:body></w:document>"#);
+    zip.add_file("word/document.xml", &doc_xml);
 
     zip.finish()
+}
+
+fn u16_to_str(mut val: u16, buf: &mut [u8]) -> &str {
+    if val == 0 {
+        buf[0] = b'0';
+        return unsafe { core::str::from_utf8_unchecked(&buf[..1]) };
+    }
+    let mut i = buf.len();
+    while val > 0 {
+        i -= 1;
+        buf[i] = b'0' + (val % 10) as u8;
+        val /= 10;
+    }
+    unsafe { core::str::from_utf8_unchecked(&buf[i..]) }
+}
+
+/// Locate standard word/document.xml in stored ZIP archive
+pub fn find_xml_in_zip(zip_bytes: &[u8]) -> Option<&[u8]> {
+    let mut i = 0;
+    while i + 30 <= zip_bytes.len() {
+        if zip_bytes[i..i+4] == [0x50, 0x4B, 0x03, 0x04] {
+            let data_size = u32::from_le_bytes([zip_bytes[i+18], zip_bytes[i+19], zip_bytes[i+20], zip_bytes[i+21]]) as usize;
+            let name_len = u16::from_le_bytes([zip_bytes[i+26], zip_bytes[i+27]]) as usize;
+            let extra_len = u16::from_le_bytes([zip_bytes[i+28], zip_bytes[i+29]]) as usize;
+            
+            if i + 30 + name_len <= zip_bytes.len() {
+                let filename = &zip_bytes[i+30..i+30+name_len];
+                if filename == b"word/document.xml" {
+                    let data_start = i + 30 + name_len + extra_len;
+                    if data_start + data_size <= zip_bytes.len() {
+                        return Some(&zip_bytes[data_start..data_start + data_size]);
+                    }
+                }
+            }
+            i += 30 + name_len + extra_len + data_size;
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+/// Parses the word/document.xml content to reconstruct text and styled spans
+pub fn parse_docx(
+    zip_bytes: &[u8],
+    out_text: &mut alloc::vec::Vec<u8>,
+    out_spans: &mut alloc::vec::Vec<TextSpan>,
+) -> Result<(), &'static str> {
+    let xml = find_xml_in_zip(zip_bytes).ok_or("Failed to find word/document.xml in docx archive")?;
+    
+    let mut i = 0;
+    let mut bold = false;
+    let mut italic = false;
+    let mut size = 16u16;
+    
+    while i < xml.len() {
+        if xml[i] == b'<' {
+            let mut end_tag = i;
+            while end_tag < xml.len() && xml[end_tag] != b'>' {
+                end_tag += 1;
+            }
+            if end_tag >= xml.len() { break; }
+            
+            let tag_content = &xml[i+1..end_tag];
+            
+            if tag_content == b"w:p" {
+                // New paragraph starts
+            } else if tag_content == b"/w:p" {
+                out_text.push(b'\n');
+            } else if tag_content == b"w:r" {
+                // Reset styles to default
+                bold = false;
+                italic = false;
+                size = 16;
+            } else if tag_content == b"w:b/" || tag_content.starts_with(b"w:b ") {
+                bold = true;
+            } else if tag_content == b"w:i/" || tag_content.starts_with(b"w:i ") {
+                italic = true;
+            } else if tag_content.starts_with(b"w:sz ") {
+                // Parse font size (e.g. w:val="32")
+                let mut sz_val_opt = None;
+                for idx in 0..tag_content.len() {
+                    if tag_content[idx..].starts_with(b"w:val=\"") {
+                        let start = idx + 7;
+                        let mut end = start;
+                        while end < tag_content.len() && tag_content[end] >= b'0' && tag_content[end] <= b'9' {
+                            end += 1;
+                        }
+                        if let Ok(s) = core::str::from_utf8(&tag_content[start..end]) {
+                            if let Ok(val) = s.parse::<u16>() {
+                                sz_val_opt = Some(val);
+                            }
+                        }
+                        break;
+                    }
+                }
+                if let Some(val) = sz_val_opt {
+                    size = val / 2;
+                }
+            } else if tag_content.starts_with(b"w:t") {
+                let text_start = end_tag + 1;
+                let mut text_end = text_start;
+                while text_end + 5 <= xml.len() && &xml[text_end..text_end+6] != b"</w:t>" {
+                    text_end += 1;
+                }
+                
+                if text_end + 5 <= xml.len() {
+                    let raw_text = &xml[text_start..text_end];
+                    let mut unescaped = alloc::vec::Vec::new();
+                    let mut ti = 0;
+                    while ti < raw_text.len() {
+                        if raw_text[ti] == b'&' {
+                            if ti + 4 <= raw_text.len() && &raw_text[ti..ti+5] == b"&amp;" {
+                                unescaped.push(b'&');
+                                ti += 5;
+                            } else if ti + 3 <= raw_text.len() && &raw_text[ti..ti+4] == b"&lt;" {
+                                unescaped.push(b'<');
+                                ti += 4;
+                            } else if ti + 3 <= raw_text.len() && &raw_text[ti..ti+4] == b"&gt;" {
+                                unescaped.push(b'>');
+                                ti += 4;
+                            } else {
+                                unescaped.push(raw_text[ti]);
+                                ti += 1;
+                            }
+                        } else {
+                            unescaped.push(raw_text[ti]);
+                            ti += 1;
+                        }
+                    }
+                    
+                    if !unescaped.is_empty() {
+                        let span_start = out_text.len();
+                        out_text.extend_from_slice(&unescaped);
+                        let span_end = out_text.len();
+                        out_spans.push(TextSpan {
+                            start: span_start,
+                            end: span_end,
+                            style: TextStyle { bold, italic, size },
+                        });
+                    }
+                    i = text_end + 6;
+                    continue;
+                }
+            }
+            i = end_tag + 1;
+        } else {
+            i += 1;
+        }
+    }
+    Ok(())
 }

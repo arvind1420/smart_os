@@ -1,5 +1,5 @@
 [package]
-name = "pkg_installer"
+name = "ai_assistant"
 version = "0.1.0"
 edition = "2024"
 

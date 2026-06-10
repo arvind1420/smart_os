@@ -1,0 +1,11 @@
+[package]
+name = "video_player"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+smartsdk = { path = "../../smartsdk" }
+
+[[bin]]
+name = "video_player"
+path = "src/main.rs"
