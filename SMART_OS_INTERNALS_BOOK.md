@@ -1,7 +1,7 @@
 # The Internals of Smart OS
 ## A Deep Dive into a Cognitive, Rust-Based Operating System
 
-**Author:** Smart OS Development Team  
+**Author:** Arvind Kumar Singh  
 **Date:** April 13, 2026  
 **Version:** 0.12.0 (Alpha)
 

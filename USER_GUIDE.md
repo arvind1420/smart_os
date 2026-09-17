@@ -224,4 +224,4 @@ The recommended way to run Smart OS during development:
 
 ---
 
-*© 2026 Smart OS Contributors. Built with Rust. v0.12.0*
+*© 2026 Arvind Kumar Singh. Built with Rust. v0.12.0*
