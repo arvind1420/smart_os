@@ -1,5 +1,5 @@
 
-"C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" convertfromraw "C:\Users\arvin\Desktop\Github\Smart OS\target\smartos.img" "C:\Users\arvin\Desktop\Github\Smart OS\target\smartos.vdi" --format VDI
+"C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" convertfromraw "C:\path\to\smart-os\target\smartos.img" "C:\path\to\smart-os\target\smartos.vdi" --format VDI
 
  On Windows
    1. Download Rufus (rufus.ie (https://rufus.ie)).
