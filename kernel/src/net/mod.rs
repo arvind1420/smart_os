@@ -86,6 +86,7 @@ pub mod browser_persistence;
 pub mod security_polish;
 pub mod perf_hints;
 pub mod crash_reporter;
+pub mod wpt_real;
 
 /// Static Ethernet broadcast MAC.
 pub const BROADCAST_MAC: [u8; 6] = [0xFF; 6];

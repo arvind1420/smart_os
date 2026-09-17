@@ -3,6 +3,7 @@ members = [
     "smartpack",
     "kernel",
     "tools/image_builder",
+    "tools/js_harness",
     "smartsdk",
     "tools/module_loader",
     "apps/dashboard",
@@ -26,7 +27,6 @@ resolver = "2"
 version = "0.1.0"
 edition = "2024"
 authors = ["Smart OS Contributors"]
-license = "MIT"
 
 [profile.dev]
 panic = "abort"

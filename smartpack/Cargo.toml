@@ -3,7 +3,6 @@ name = "smartpack"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-license.workspace = true
 description = "SmartPack: Ultra-compact binary serialization format for Smart OS"
 
 [features]

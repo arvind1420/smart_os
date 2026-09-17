@@ -1,0 +1,13 @@
+[package]
+name = "js_harness"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Host-side test harness for the SmartOS browser JS engine (Tier 1 WPT iteration)"
+
+[dependencies]
+spin = "0.9"
+
+[[bin]]
+name = "js_harness"
+path = "src/main.rs"

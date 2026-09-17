@@ -927,6 +927,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     } else {
         serial_println!("[test] Crash Reporter Phase 140: FAILED");
     }
+    // Phase 141: Real WPT subset (Tier 1 correctness baseline)
+    serial_println!("[init] Phase 141: Real WPT subset — testharness.js shim + curated wpt corpus");
+    let _ = net::wpt_real::self_test();
     // Phase 99: WOFF web font parser
     if net::woff::self_test() {
         serial_println!("[test] WOFF font parser: detect/parse/extract/name-table/font-face PASSED");
