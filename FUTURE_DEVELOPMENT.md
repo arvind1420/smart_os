@@ -296,9 +296,6 @@ Revenue cannot flow without these foundations.
 
 - **Legal entity** — Incorporate (Delaware C-Corp recommended for VC optionality;
   UK Ltd if EU-first); open a business bank account
-- **Patents** — File provisional applications for: SmartPack binary format,
-  AI-directed OS scheduling, SmartFS chunking, kernel-level ransomware detection,
-  PQC sovereign identity architecture (~6–8 applications)
 - **Trademarks** — Register "Smart OS", "SmartPack", "SmartSDK" in US, EU, UK, and India
 - **Dual license** — GPL v3 for Community edition + commercial license for OEM,
   enterprise, and App Store revenue sharing
