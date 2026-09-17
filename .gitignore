@@ -1,4 +1,8 @@
 /target/
-.claude/worktrees/
+.claude/
 .claire/
 nul
+Thumbs.db
+.DS_Store
+focus fields.txt
+inspect_gpt.rs
